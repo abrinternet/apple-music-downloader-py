@@ -81,8 +81,12 @@ class Box:
 
     @property
     def size(self) -> int:
-        body = self.prologue + b"".join(c.size for c in self.children) if self.children else self.payload
-        return 8 + len(body)
+        """Encoded box size without building the full payload."""
+        if self.children:
+            body_len = len(self.prologue) + sum(child.size for child in self.children)
+        else:
+            body_len = len(self.payload)
+        return 8 + body_len
 
     def find(self, box_type: str) -> "Box | None":
         for child in self.children:
