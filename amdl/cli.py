@@ -210,6 +210,14 @@ def handle_search(state_obj, search_type: str, query_parts: list[str], token: st
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles default to a legacy codepage that cannot render the
+    # check/warning symbols the Go implementation writes as UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     # The downloader reads config.yaml from the current directory like the Go
     # binary does.
     try:
