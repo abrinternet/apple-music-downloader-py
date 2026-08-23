@@ -62,7 +62,8 @@ def write_mp4_tags(state_obj: State, track, lrc: str) -> None:
     resp_attrs = track.resp.attributes
 
     mp4 = MP4(track.save_path)
-    mp4.clear()
+    # Do NOT clear(): the MP4Box -itags pre-pass already embedded the cover
+    # art (covr) and we must preserve it; assigning below overwrites the rest.
 
     mp4["\xa9nam"] = [resp_attrs.name]
     mp4["\xa9ART"] = [resp_attrs.artist_name]

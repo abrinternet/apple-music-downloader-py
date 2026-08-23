@@ -6,6 +6,9 @@ with an optional proxy URL.
 
 from __future__ import annotations
 
+import os
+import socket
+
 import httpx
 
 DEFAULT_TIMEOUT = 60.0
@@ -16,6 +19,20 @@ DEFAULT_TIMEOUT = 60.0
 client: httpx.Client = httpx.Client(
     trust_env=True, timeout=DEFAULT_TIMEOUT, follow_redirects=True
 )
+
+_original_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+
+def _force_ipv4_if_requested() -> None:
+    """Opt-in workaround for dual-stack environments without working IPv6
+    (e.g. some Docker bridges). Go survives them via Happy Eyeballs; httpx
+    does not, so AMDL_FORCE_IPV4=1 pins name resolution to A records."""
+    if os.getenv("AMDL_FORCE_IPV4", "").strip().lower() in ("1", "true", "yes"):
+        socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 
 def _make_client(**kwargs) -> httpx.Client:
@@ -29,6 +46,7 @@ def init(proxy_url: str | None) -> None:
     of: socks5://[user:pass@]host:port, socks5h://..., http://..., https://...
     """
     global client
+    _force_ipv4_if_requested()
     proxy_url = (proxy_url or "").strip()
     if not proxy_url or proxy_url == "system":
         if not client.is_closed:
