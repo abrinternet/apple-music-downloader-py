@@ -171,10 +171,12 @@ class CDM:
         ]
         request_msg = encode_fields(license_request)
 
-        digest = hashes.Hash(hashes.SHA1())
-        digest.update(request_msg)
+        # cryptography's sign()/verify() take the RAW MESSAGE and hash it
+        # themselves -- passing a precomputed digest here would sign
+        # SHA1(SHA1(msg)) and Apple rejects the license request with
+        # status -1021.
         signature = self.private_key.sign(
-            digest.finalize(),
+            request_msg,
             padding.PSS(mgf=padding.MGF1(hashes.SHA1()), salt_length=20),
             hashes.SHA1(),
         )

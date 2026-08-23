@@ -183,7 +183,10 @@ def get_webplayback(
             return entry.get("hls-playlist-url", ""), "", ""
         for asset in entry.get("assets", []):
             if asset.get("flavor") == "28:ctrp256":
-                return extract_kid_base64(asset["URL"], False)
+                # Go: extractKidBase64 returns (kid, fileUrl, uriPrefix) but
+                # GetWebplayback returns (fileUrl, kidBase64, uriPrefix).
+                kid_b64, file_url, uri_prefix = extract_kid_base64(asset["URL"], False)
+                return file_url, kid_b64, uri_prefix
     raise Unavailable("Unavailable")
 
 
@@ -370,7 +373,17 @@ def run(
     ctx = {"pssh": kid_base64, "adamId": adam_id, "uriPrefix": uri_prefix}
     pssh = get_pssh("", kid_base64)
 
-    client = httpx.Client(trust_env=True, timeout=60.0, follow_redirects=True)
+    # resty.New().SetHeaders() in the Go version bakes these into every
+    # request the license fetcher makes, including BeforeRequest's POST.
+    client = httpx.Client(
+        trust_env=True,
+        timeout=60.0,
+        follow_redirects=True,
+        headers={
+            "authorization": "Bearer " + authtoken,
+            "x-apple-music-user-token": mutoken,
+        },
+    )
     fetcher = KeyFetcher(
         client=client,
         before_request=lambda cl, c, u, body: before_request(cl, c, u, body),

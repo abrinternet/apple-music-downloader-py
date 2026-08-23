@@ -101,7 +101,13 @@ def process_urls(state_obj: State, args_list: list[str], token: str) -> int:
                 total_before = state_obj.counter.total
                 errors_before = state_obj.counter.error
                 try:
-                    rip_song(state_obj, song_id, token, storefront)
+                    rip_song(
+                        state_obj,
+                        song_id,
+                        token,
+                        storefront,
+                        state_obj.config.media_user_token,
+                    )
                 except Exception as exc:
                     print(f"Failed to rip song: {exc}")
                     if state_obj.counter.total == total_before:
@@ -124,6 +130,7 @@ def process_urls(state_obj: State, args_list: list[str], token: str) -> int:
                         album_id,
                         token,
                         storefront,
+                        media_user_token=state_obj.config.media_user_token,
                         url_arg_i=url_arg_i,
                     )
                 except Exception as exc:
@@ -138,7 +145,13 @@ def process_urls(state_obj: State, args_list: list[str], token: str) -> int:
                 total_before = state_obj.counter.total
                 errors_before = state_obj.counter.error
                 try:
-                    rip_playlist(state_obj, playlist_id, token, storefront)
+                    rip_playlist(
+                        state_obj,
+                        playlist_id,
+                        token,
+                        storefront,
+                        state_obj.config.media_user_token,
+                    )
                 except Exception as exc:
                     print(f"Failed to rip playlist: {exc}")
                     if state_obj.counter.total == total_before:
@@ -156,7 +169,13 @@ def process_urls(state_obj: State, args_list: list[str], token: str) -> int:
                 total_before = state_obj.counter.total
                 errors_before = state_obj.counter.error
                 try:
-                    rip_station(state_obj, station_id, token, storefront)
+                    rip_station(
+                        state_obj,
+                        station_id,
+                        token,
+                        storefront,
+                        state_obj.config.media_user_token,
+                    )
                 except Exception as exc:
                     print(f"Failed to rip station: {exc}")
                     if state_obj.counter.total == total_before:

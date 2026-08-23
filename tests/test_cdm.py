@@ -91,10 +91,10 @@ def test_request_signature_and_key_roundtrip():
     signature = slr[3]
 
     public_key = CDM.new_default(init_data).private_key.public_key()
-    digest = hashlib.sha1(request_msg).digest()
+    # cryptography hashes the raw message internally -- do NOT pre-hash here.
     public_key.verify(
         signature,
-        digest,
+        request_msg,
         padding.PSS(mgf=padding.MGF1(hashes.SHA1()), salt_length=20),
         hashes.SHA1(),
     )
