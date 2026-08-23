@@ -119,3 +119,124 @@ def test_is_path_within_root(tmp_path):
     root = str(tmp_path.resolve())
     assert is_path_within_root(root, str(tmp_path / "sub" / "f.m4a"))
     assert not is_path_within_root(root, str(tmp_path.parent / "elsewhere.m4a"))
+
+
+def _fake_bot(tmp_path, delete_after_upload):
+    import threading
+
+    from amdltgbot.bot import Bot
+    from amdltgbot.client import TelegramClient
+    from amdltgbot.config import Config
+
+    class FakeAPI:
+        def __init__(self):
+            self.sent = []
+            self.messages = []
+
+        def send_chat_action(self, chat_id, action):
+            pass
+
+        def send_message(self, chat_id, message):
+            self.messages.append(message)
+
+        def send_document(self, chat_id, path, caption):
+            self.sent.append(path)
+
+    cfg = Config(
+        download_root=str(tmp_path),
+        downloader="/nonexistent",
+        work_dir=str(tmp_path),
+        max_upload_bytes=0,
+        max_files_per_job=0,
+        upload_retries=0,
+        delete_after_upload=delete_after_upload,
+    )
+    fake_api = FakeAPI()
+    return Bot(cfg, fake_api, threading.Event()), fake_api
+
+
+def test_delete_after_upload_removes_file_and_prunes_dirs(tmp_path, monkeypatch):
+    import threading
+
+    import amdltgbot.bot as bot_mod
+    from amdltgbot.bot import Bot, UploadState
+    from amdltgbot.config import Config
+
+    album_dir = tmp_path / "AAC" / "Artista" / "Album"
+    album_dir.mkdir(parents=True)
+    music = album_dir / "01. faixa.m4a"
+    music.write_bytes(b"x" * 64)
+
+    before = snapshot_files(str(tmp_path))
+    bot, _api = _fake_bot(tmp_path, True)
+
+    # nao chamar ffprobe real
+    monkeypatch.setattr(bot_mod, "describe_audio_file", lambda p: ("", None))
+
+    job = type("J", (), {"chat_id": 1, "fmt": "aac"})()
+    uploads = UploadState()
+    cancel = threading.Event()
+
+    bot.upload_available_files(job, uploads, [str(music)], before, False, cancel)
+
+    assert uploads.sent == 1 and uploads.deleted == 1
+    assert not music.exists()
+    assert not album_dir.exists()  # diretorio vazio foi podado
+
+
+def test_delete_after_upload_false_keeps_file(tmp_path, monkeypatch):
+    import threading
+
+    import amdltgbot.bot as bot_mod
+    from amdltgbot.bot import Bot, UploadState
+    from amdltgbot.config import Config
+
+    music = tmp_path / "02. faixa.m4a"
+    music.write_bytes(b"y")
+    before = snapshot_files(str(tmp_path))
+
+    bot, api = _fake_bot(tmp_path, False)
+    monkeypatch.setattr(bot_mod, "describe_audio_file", lambda p: ("", None))
+
+    job = type("J", (), {"chat_id": 1, "fmt": "aac"})()
+    uploads = UploadState()
+    cancel = threading.Event()
+    bot.upload_available_files(job, uploads, [str(music)], before, False, cancel)
+
+    assert uploads.sent == 1 and uploads.deleted == 0
+    assert music.exists()
+
+
+def test_send_failure_keeps_file_for_retry(tmp_path, monkeypatch):
+    import threading
+
+    import amdltgbot.bot as bot_mod
+    from amdltgbot.bot import Bot, UploadState
+    from amdltgbot.config import Config
+
+    music = tmp_path / "03. faixa.m4a"
+    music.write_bytes(b"z")
+    before = snapshot_files(str(tmp_path))
+
+    bot, api = _fake_bot(tmp_path, True)
+
+    class FailingClient:
+        def send_chat_action(self, *a):
+            pass
+
+        def send_message(self, *a):
+            pass
+
+        def send_document(self, *a):
+            raise RuntimeError("telegram fora do ar")
+
+    bot.api = FailingClient()
+    monkeypatch.setattr(bot_mod, "describe_audio_file", lambda p: ("", None))
+
+    job = type("J", (), {"chat_id": 1, "fmt": "aac"})()
+    uploads = UploadState()
+    cancel = threading.Event()
+    bot.upload_available_files(job, uploads, [str(music)], before, False, cancel)
+
+    assert uploads.failed == 1 and uploads.sent == 0
+    assert music.exists()  # arquivo preservado quando o envio falha
