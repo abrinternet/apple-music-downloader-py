@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import cover as cover_mod, convert, lyrics as lyrics_mod, runv2
 from .ampapi.api import get_music_video_resp, get_song_resp, get_song_resp_by_isrc
+from .runv2 import Runv2Error
 from .state import AddedTrack, State, sanitize_name
 from .tags import run_mp4box_itags, write_mp4_tags
 from .task import Album, Playlist, Station, Track
@@ -284,6 +285,44 @@ def _tag_string(state_obj: State, is_apple_master: bool, content_rating: str | N
 # --- ripTrack ---------------------------------------------------------------------
 
 
+def _run_v2_com_fallback_dispositivo(
+    state_obj: State, track: Track, url_inicial: str, caminho_saida: str
+) -> None:
+    """Executa runv2 com fallback automático para a playlist do dispositivo.
+
+    Playlists da Web (skd:// do catálogo) podem ser recusadas pelo agente
+    FairPlay no meio do fluxo CBCS -- o app não provisiona essa chave fora da
+    própria sessão de playback, derruba a conexão e o downloader recebe RST.
+    Nesse caso específico, pede ao agente (porta 20020) a playlist vinculada à
+    sessão do dispositivo e repete o download uma única vez.
+    """
+    usando_dispositivo = False
+    url_atual = url_inicial
+    while True:
+        try:
+            return runv2.run(state_obj, track.id, url_atual, caminho_saida)
+        except (ConnectionResetError, BrokenPipeError, Runv2Error) as exc:
+            reset_detectado = isinstance(exc, (ConnectionResetError, BrokenPipeError)) or (
+                "closed the connection" in str(exc)
+            )
+            if (
+                usando_dispositivo
+                or not state_obj.config.get_m3u8_from_device
+                or not reset_detectado
+            ):
+                raise
+            usando_dispositivo = True
+            print("Playlist da Web recusada pelo agente; repetindo com a playlist do dispositivo...")
+            from .rip import check_m3u8
+
+            url_dispositivo = check_m3u8(state_obj, track.id, "song")
+            if not url_dispositivo.endswith(".m3u8"):
+                raise
+            track.device_m3u8 = url_dispositivo
+            track.m3u8 = url_dispositivo
+            url_atual = url_dispositivo
+
+
 def rip_track(state_obj: State, track: Track, token: str, media_user_token: str) -> None:
     from .rip import check_m3u8, extract_media
 
@@ -444,7 +483,9 @@ def rip_track(state_obj: State, track: Track, token: str, media_user_token: str)
             state_obj.counter.unavailable += 1
             return
         try:
-            runv2.run(state_obj, track.id, track_m3u8_url, track_path)
+            _run_v2_com_fallback_dispositivo(
+                state_obj, track, track_m3u8_url, track_path
+            )
         except Exception as exc:
             import traceback
 
