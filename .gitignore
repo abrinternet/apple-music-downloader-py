@@ -10,3 +10,9 @@ venv/
 config.yaml
 *.log
 generated_widevine_pb2.py
+
+# artefatos locais de teste/comparacao (contem credenciais e midia)
+go-compare/
+secrets/
+downloads/
+**/manifest-*.json
