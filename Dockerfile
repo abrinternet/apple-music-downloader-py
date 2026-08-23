@@ -80,7 +80,12 @@ RUN apk add --no-cache \
     && install -d -o 10001 -g 10001 /app /downloads /downloads/.tmp
 
 ENV TMPDIR=/downloads/.tmp \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Drop-in aliases matching the names the production compose expects.
+RUN ln -sf /usr/local/bin/apple-music-tgbot /usr/local/bin/apple-music-telegram-bot \
+    && ln -sf /usr/local/bin/apple-music-dl /usr/local/bin/apple-music-downloader-py
 
 COPY --from=python-build --link /install /usr/local
 COPY --from=bento4-builder --link /out/mp4decrypt /usr/local/bin/mp4decrypt
