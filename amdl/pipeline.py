@@ -7,6 +7,7 @@ and the manifest-resolution helpers (main.go lines 948-1998 and 2437-2612).
 from __future__ import annotations
 
 import os
+import sys
 import shutil
 import subprocess
 from pathlib import Path
@@ -445,7 +446,11 @@ def rip_track(state_obj: State, track: Track, token: str, media_user_token: str)
         try:
             runv2.run(state_obj, track.id, track_m3u8_url, track_path)
         except Exception as exc:
-            print(f"Failed to run v2: {exc}")
+            import traceback
+
+            traceback.print_exc()
+            sys.stdout.flush()
+            print(f"Failed to run v2: {exc}", flush=True)
             state_obj.counter.error += 1
             return
 
