@@ -53,6 +53,35 @@ protocolo do agente TCP com servidor simulado e conversão TTML→LRC:
 pytest
 ```
 
+## Docker (Alpine)
+
+Imagem multi-estágio baseada em `python:3.12-alpine` (~150 MB), com `ffmpeg` dos
+repositórios Alpine e `mp4decrypt`/`MP4Box` compilados das mesmas revisões
+fixadas (com checksum) da imagem Go — o Alpine não tem pacote `gpac`.
+
+Alvos:
+
+- `downloader` — CLI interativa (`docker build --target downloader`)
+- `telegram-bot` — bot (`--target telegram-bot`), invoca o CLI via subprocesso
+
+```bash
+# CLI pontual (perfil "cli" no compose)
+echo "seu-media-user-token" > secrets/media-user-token.txt
+docker compose --profile cli run --rm downloader <url>
+
+# Bot em produção (usa o mesmo wrapper Android do deploy Go)
+mkdir -p secrets/telegram
+printf 'SEU_BOT_TOKEN' > secrets/telegram/bot-token.txt
+printf 'SEU_TELEGRAM_ID' > secrets/telegram/allowed-users.txt
+docker compose up -d wrapper telegram-bot
+```
+
+O `compose.yaml` mantém a topologia do deploy Go: o serviço `wrapper`
+(imagem publicada `augustobr/apple-music-wrapper`) expõe as portas
+10020/20020/30020 no localhost compartilhado, e os contêineres Python rodam
+não-root (`10001`), read-only, sem capabilities.
+
+
 ## Estrutura
 
 - `amdl/` — CLI: `pipeline.py` (fluxos de download), `runv2.py` (ALAC via TCP),

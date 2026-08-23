@@ -1,0 +1,19 @@
+# Keep build context minimal: only the two packages, pyproject and configs
+# are COPYed by the Dockerfile.
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+*.egg-info
+build
+dist
+tests
+downloads
+secrets
+config.yaml
+*.log
+compose.yaml
+README-CN.md

@@ -1,0 +1,164 @@
+name: apple-music-alac-py
+
+# Same topology as the Go deployment: a privileged wrapper container runs the
+# Apple Music Android app under redroid and exposes the decryptor (10020),
+# m3u8 resolver (20020) and account service (30020) on localhost; the Python
+# downloader/bot share its network namespace and talk to it over loopback.
+
+x-wrapper-common: &wrapper-common
+  # The wrapper (Apple Music Android under redroid) is shared infrastructure:
+  # the published image is used directly; its build sources live in the
+  # abrinternet/apple-music-downloader (Go) repository.
+  image: augustobr/apple-music-wrapper:latest
+  platform: linux/amd64
+  privileged: true
+  network_mode: bridge
+  cpus: 0.75
+  cpu_shares: 256
+  mem_limit: 384m
+  mem_reservation: 64m
+  memswap_limit: 768m
+  pids_limit: 256
+  stop_grace_period: 30s
+  logging:
+    driver: local
+    options:
+      max-size: 5m
+      max-file: "2"
+      compress: "true"
+  volumes:
+    - wrapper-data:/data/apple-wrapper
+  secrets:
+    - wrapper_android_id
+
+services:
+  wrapper:
+    <<: *wrapper-common
+    restart: unless-stopped
+    expose:
+      - "10020"
+      - "20020"
+      - "30020"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          main_default="$$(ip -4 route show table main | grep '^default ' | head -n 1)"
+          && main_connected="$$(ip -4 route show table main | grep ' dev eth0 ' | grep -v '^default ' | head -n 1)"
+          && test -n "$$main_default"
+          && test -n "$$main_connected"
+          && ip -4 route replace table 98 $$main_connected
+          && ip -4 route replace table 98 $$main_default
+          && test "$$(getprop init.svc.apple-wrapper)" = running
+          && nc -w 1 127.0.0.1 10020 </dev/null
+          && nc -w 1 127.0.0.1 20020 </dev/null
+          && nc -w 1 127.0.0.1 30020 </dev/null
+      interval: 30s
+      start_interval: 2s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+
+  wrapper-import:
+    <<: *wrapper-common
+    profiles:
+      - setup
+    command:
+      - androidboot.wrapper_import=1
+    volumes:
+      - wrapper-data:/data/apple-wrapper
+      - ./secrets/login/legacy-account.json:/run/legacy-account:ro
+
+  downloader:
+    image: apple-music-downloader-py:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: downloader
+    profiles:
+      - cli
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      wrapper:
+        condition: service_healthy
+    network_mode: "service:wrapper"
+    environment:
+      MEDIA_USER_TOKEN_FILE: /run/secrets/media_user_token
+      WRAPPER_ACCOUNT_URL: http://127.0.0.1:30020/
+      TMPDIR: /downloads/.tmp
+    secrets:
+      - media_user_token
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./config.docker.yaml:/app/config.yaml:ro
+      - ./downloads:/downloads
+
+  telegram-bot:
+    image: apple-music-telegram-bot-py:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: telegram-bot
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=32m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 1.25
+    cpu_shares: 768
+    mem_limit: 512m
+    mem_reservation: 64m
+    memswap_limit: 1024m
+    pids_limit: 192
+    logging:
+      driver: local
+      options:
+        max-size: 5m
+        max-file: "2"
+        compress: "true"
+    depends_on:
+      wrapper:
+        condition: service_healthy
+    network_mode: "service:wrapper"
+    environment:
+      MEDIA_USER_TOKEN_FILE: /run/secrets/media_user_token
+      WRAPPER_ACCOUNT_URL: http://127.0.0.1:30020/
+      TELEGRAM_BOT_TOKEN_FILE: /run/telegram-secrets/bot-token.txt
+      TELEGRAM_ALLOWED_USER_IDS_FILE: /run/telegram-secrets/allowed-users.txt
+      TELEGRAM_DOWNLOAD_ROOT: /downloads
+      TELEGRAM_DOWNLOADER_TEMP_DIR: /downloads/.tmp
+      TELEGRAM_DOWNLOADER_BIN: /usr/local/bin/apple-music-dl
+      TELEGRAM_DELETE_AFTER_UPLOAD: "1"
+      TELEGRAM_DEFAULT_FORMAT: alac
+      TELEGRAM_MAX_FILES_PER_JOB: "0"
+      TELEGRAM_UPLOAD_RETRIES: "3"
+      # Para servidor local da Telegram Bot API (permite envio de até 2000 MB / 2 GB):
+      # TELEGRAM_API_BASE_URL: http://telegram-bot-api:8081
+      # TELEGRAM_MAX_UPLOAD_MB: "2000"
+    secrets:
+      - media_user_token
+    stop_grace_period: 30s
+    volumes:
+      - ./config.docker.yaml:/app/config.yaml:ro
+      - ./downloads:/downloads
+      - ./secrets/telegram:/run/telegram-secrets:ro
+
+secrets:
+  media_user_token:
+    file: ./secrets/media-user-token.txt
+  wrapper_android_id:
+    file: ./secrets/wrapper-android-id.txt
+
+volumes:
+  wrapper-data:

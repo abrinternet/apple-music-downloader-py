@@ -1,0 +1,68 @@
+# The media-user-token is injected from /run/secrets/media_user_token.
+# Keep the credential out of this tracked configuration file.
+media-user-token: ""
+authorization-token: "your-authorization-token"
+language: ""
+lrc-type: "lyrics"
+lrc-format: "lrc"
+embed-lrc: true
+save-lrc-file: false
+save-artist-cover: false
+save-animated-artwork: false
+emby-animated-artwork: false
+embed-cover: true
+cover-size: 5000x5000
+cover-format: jpg
+tag-sort-order: true
+tag-itunes-id: true
+
+alac-save-folder: "/downloads/ALAC"
+atmos-save-folder: "/downloads/Atmos"
+aac-save-folder: "/downloads/AAC"
+mv-save-folder: "/downloads/MV"
+
+# Keep large lossless tracks streaming to disk. Values above the container's
+# practical headroom make the downloader hold both encrypted and decrypted
+# copies in RAM and can OOM on 24-bit/192 kHz media.
+max-memory-limit: 32
+decrypt-m3u8-port: "127.0.0.1:10020"
+get-m3u8-port: "127.0.0.1:20020"
+get-m3u8-from-device: true
+get-m3u8-mode: all
+exit-on-error: true
+
+# ALAC is the default whenever --aac and --atmos are omitted.
+alac-max: 192000
+alac-fix: false
+aac-type: aac-lc
+atmos-max: 2768
+limit-max: 200
+
+album-folder-format: "{AlbumName}"
+playlist-folder-format: "{PlaylistName}"
+song-file-format: "{SongNumer}. {SongName}"
+artist-folder-format: "{UrlArtistName}"
+
+explicit-choice: "[E]"
+clean-choice: "[C]"
+apple-master-choice: "[M]"
+use-songinfo-for-playlist: false
+dl-albumcover-for-playlist: false
+mv-audio-type: atmos
+mv-max: 2160
+
+# Change this if the Apple Music subscription belongs to another storefront.
+storefront: "br"
+
+convert-after-download: false
+convert-format: "flac"
+convert-keep-original: false
+convert-skip-if-source-matches: true
+ffmpeg-path: "ffmpeg"
+convert-extra-args: ""
+convert-with-metadata: true
+convert-warn-lossy-to-lossless: true
+convert-skip-lossy-to-lossless: true
+convert-check-bad-alac: false
+convert-delete-bad-alac: false
+proxy: ""
