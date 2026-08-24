@@ -82,7 +82,15 @@ def process_urls(state_obj: State, args_list: list[str], token: str) -> int:
                     mv_save_dir = state_obj.config.mv_save_folder
                 storefront, album_id = urls.check_url_mv(url_raw)
                 try:
-                    mv_downloader(state_obj, album_id, mv_save_dir, token, storefront, None, None)
+                    mv_downloader(
+                        state_obj,
+                        album_id,
+                        mv_save_dir,
+                        token,
+                        storefront,
+                        state_obj.config.media_user_token,
+                        None,
+                    )
                 except Exception as exc:
                     print(f"⚠ Failed to dl MV: {exc}")
                     state_obj.counter.error += 1
