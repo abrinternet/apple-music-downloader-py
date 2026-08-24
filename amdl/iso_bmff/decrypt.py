@@ -109,6 +109,7 @@ def parse_tfhd(box: Box) -> dict:
 
 @dataclass
 class TrunInfo:
+    sample_count: int = 0
     data_offset: int | None = None
     first_sample_flags: int | None = None
     durations: list[int] = field(default_factory=list)
@@ -123,7 +124,7 @@ def parse_trun(box: Box) -> TrunInfo:
     version = p[0]
     flags = struct.unpack(">I", b"\x00" + p[1:4])[0]
     sample_count = struct.unpack(">I", p[4:8])[0]
-    info = TrunInfo()
+    info = TrunInfo(sample_count=sample_count)
     pos = 8
     if flags & 0x000001:
         info.data_offset = struct.unpack(">i", p[pos : pos + 4])[0]
@@ -263,6 +264,32 @@ def decrypt_init(moov: Box) -> DecryptInfo:
     return info
 
 
+def remove_init_encryption(moov: Box) -> None:
+    """Strip encryption metadata from an init moov, in place.
+
+    Mirrors what the mp4ff DecryptInit does to the init segment before it is
+    written out: every stsd sample entry loses its sinf box and is renamed to
+    the original format advertised by frma (enca -> alac/mp4a), and pssh boxes
+    are dropped from the moov. Without this the output file keeps a tenc box
+    with the constant IV and players treat the (already decrypted) samples as
+    encrypted.
+    """
+    for trak in moov.find_all("trak"):
+        stsd = trak.find_path("mdia", "minf", "stbl", "stsd")
+        if stsd is None:
+            continue
+        for entry in stsd.children:
+            sinf = entry.find_path("sinf")
+            if sinf is None:
+                continue
+            frma = sinf.find("frma")
+            if frma is not None and len(frma.payload) >= 4:
+                entry.type = frma.payload[:4].decode("latin-1")
+            entry.remove(sinf)
+    for pssh_box in moov.find_all("pssh"):
+        moov.remove(pssh_box)
+
+
 # --- sample extraction ---------------------------------------------------------
 
 
@@ -292,11 +319,18 @@ def _segment_layout(segment: list[Box]) -> tuple[list[tuple[Box, int]], int]:
     return layout, offset
 
 
-def _sample_plans(segment: list[Box], track_id: int) -> tuple[int, list[dict]]:
+def _sample_plans(
+    segment: list[Box], track_id: int, trex: TrexInfo | None = None
+) -> tuple[int, list[dict]]:
     """Compute per-sample absolute offsets/sizes for one track in a fragment.
 
     Returns (base_offset_used, [{offset,size,duration,flags,cto}, ...]).
+
+    Per-sample values follow the mp4ff resolution order: explicit trun entry,
+    then the tfhd default (Apple's Atmos streams carry only default-sample-size
+    in the tfhd and bare data-offset truns), then the trex default.
     """
+    trex = trex or TrexInfo()
     moof = next((b for b in segment if b.type == "moof"), None)
     if moof is None:
         raise ValueError("fragment has no moof")
@@ -317,23 +351,27 @@ def _sample_plans(segment: list[Box], track_id: int) -> tuple[int, list[dict]]:
             base = moof_pos
         base_carry = base
 
+        def_duration = tfh.get("default_sample_duration") or trex.default_sample_duration
+        def_size = tfh.get("default_sample_size") or trex.default_sample_size
+        def_flags = tfh.get("default_sample_flags") or trex.default_sample_flags
+
         offset = base
         for trun_box in traf.find_all("trun"):
             trun = parse_trun(trun_box)
-            count = max(
-                len(trun.durations),
-                len(trun.sizes),
-                len(trun.flags_list),
-                len(trun.ct_offsets),
-            )
-            for i in range(count):
+            for i in range(trun.sample_count):
                 if i == 0 and trun.data_offset is not None:
                     offset = base + trun.data_offset
                 duration = (
-                    trun.durations[i] if i < len(trun.durations) else 0
+                    trun.durations[i]
+                    if i < len(trun.durations)
+                    else def_duration
                 )
-                size = trun.sizes[i] if i < len(trun.sizes) else 0
-                flags = trun.flags_list[i] if i < len(trun.flags_list) else 0
+                size = trun.sizes[i] if i < len(trun.sizes) else def_size
+                flags = (
+                    trun.flags_list[i]
+                    if i < len(trun.flags_list)
+                    else def_flags
+                )
                 cto = trun.ct_offsets[i] if i < len(trun.ct_offsets) else 0
                 plans.append(
                     {
@@ -350,7 +388,7 @@ def _sample_plans(segment: list[Box], track_id: int) -> tuple[int, list[dict]]:
 
 def get_full_samples(segment: list[Box], tdi: TrackDecryptInfo) -> list[FullSample]:
     """Reconstruct samples for one track from a fragment (GetFullSamples)."""
-    _, plans = _sample_plans(segment, tdi.track_id)
+    _, plans = _sample_plans(segment, tdi.track_id, tdi.trex)
 
     trex = tdi.trex or TrexInfo()
     layout, _total = _segment_layout(segment)

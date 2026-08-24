@@ -23,6 +23,7 @@ from .iso_bmff.decrypt import (
     adjust_trun_data_offsets,
     decrypt_init,
     get_full_samples,
+    remove_init_encryption,
 )
 from .state import State
 
@@ -169,9 +170,16 @@ def _read_next_fragment(stream) -> list[Box] | None:
 
 
 def transform_init(boxes: list[Box]) -> DecryptInfo:
-    """Extract track decryption info and drop encryption sbgp/sgpd boxes."""
+    """Extract track decryption info and make the init segment clear.
+
+    After the decryption info is captured, encryption sbgp/sgpd boxes are
+    dropped and sinf/pssh are stripped from the stsd entries (enca -> alac),
+    so the init written to the output file describes plain, unencrypted
+    audio -- matching the mp4ff DecryptInit mutation on the Go side.
+    """
     moov = next(b for b in boxes if b.type == "moov")
     info = decrypt_init(moov)
+    remove_init_encryption(moov)
     for trak in moov.find_all("trak"):
         stbl = trak.find_path("mdia", "minf", "stbl")
         if stbl is None:
@@ -285,12 +293,16 @@ def cbcs_decrypt_sample(
         cbcs_decrypt_raw(sock, sample_data, decrypt_block_len, skip_block_len)
         return
 
+    # Subsample regions must be decrypted in place. A bytearray slice would
+    # be a copy -- the decrypted bytes would never reach the sample (Go gets
+    # this for free because its slices are views). memoryview keeps the alias.
+    view = memoryview(sample_data)
     pos = 0
     for ss in subsample_patterns:
         pos += ss.bytes_of_clear
         if ss.bytes_of_protected <= 0:
             continue
-        region = sample_data[pos : pos + ss.bytes_of_protected]
+        region = view[pos : pos + ss.bytes_of_protected]
         cbcs_decrypt_raw(sock, region, decrypt_block_len, skip_block_len)
         pos += ss.bytes_of_protected
 

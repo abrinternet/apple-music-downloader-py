@@ -55,7 +55,11 @@ class Box:
 
     def encode_into(self, out: io.BufferedWriter | io.BytesIO) -> None:
         body = io.BytesIO()
-        if self.children:
+        if self.children or self.prologue:
+            # Sample entries parsed as pseudo-containers keep their leading
+            # bytes in prologue even when no child box survived parsing
+            # (e.g. the ALAC configuration box); dropping it here would
+            # truncate them to a bare header.
             if self.prologue:
                 body.write(self.prologue)
             for child in self.children:
@@ -82,7 +86,7 @@ class Box:
     @property
     def size(self) -> int:
         """Encoded box size without building the full payload."""
-        if self.children:
+        if self.children or self.prologue:
             body_len = len(self.prologue) + sum(child.size for child in self.children)
         else:
             body_len = len(self.payload)

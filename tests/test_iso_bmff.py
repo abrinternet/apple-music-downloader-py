@@ -192,4 +192,49 @@ def test_unknown_boxes_preserved():
     assert box.payload == b"junk-data"
 
 
+def test_sample_plans_uses_tfhd_default_size():
+    """Streams da Apple (Atmos) trazem truns com apenas data-offset.
+
+    O tamanho/duração por amostra vem dos defaults do tfhd
+    (default-base-is-moof | default-duration | default-size); sem isso o
+    planejador devolve 0 amostras e o arquivo sai sem decifrar.
+    """
+    from amdl.iso_bmff.decrypt import _sample_plans
+
+    tfhd = _box(
+        "tfhd",
+        b"\x00\x00\x00\x00"  # version/flags placeholder; flags reais abaixo
+        + struct.pack(">I", 1)  # track_id
+    )
+    # refaz com flags 0x20018: base-is-moof(0x20000)|duration(0x8)|size(0x10)
+    tfhd_body = (
+        b"\x00\x02\x00\x18"
+        + struct.pack(">I", 1)  # track_id
+        + struct.pack(">I", 1024)  # default_sample_duration
+        + struct.pack(">I", 100)  # default_sample_size
+    )
+    tfhd = struct.pack(">I", 8 + len(tfhd_body)) + b"tfhd" + tfhd_body
+    trun_body = (
+        b"\x00\x00\x00\x01"  # version 0, flags 0x1 (data-offset)
+        + struct.pack(">I", 2)  # sample_count
+        + struct.pack(">i", 8)  # data_offset
+    )
+    trun = struct.pack(">I", 8 + len(trun_body)) + b"trun" + trun_body
+    traf = _box("traf", tfhd + trun)
+    moof_bytes = _box("moof", traf)
+
+    from amdl.iso_bmff import decode_file
+
+    parsed = decode_file(moof_bytes)
+    moof = next(b for b in parsed.segments[0] if b.type == "moof")
+
+    _base, plans = _sample_plans([moof], 1)
+
+    assert len(plans) == 2
+    assert all(p["size"] == 100 for p in plans)
+    assert all(p["duration"] == 1024 for p in plans)
+    assert plans[0]["offset"] == 8  # base (moof_pos=0) + data_offset
+    assert plans[1]["offset"] == 108
+
+
 _ = (Box, os, io)

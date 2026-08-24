@@ -18,7 +18,12 @@ from pathlib import Path
 import httpx
 
 from ..iso_bmff import decode_file
-from ..iso_bmff.decrypt import NoSencError, decrypt_init, decrypt_segment
+from ..iso_bmff.decrypt import (
+    NoSencError,
+    decrypt_init,
+    decrypt_segment,
+    remove_init_encryption,
+)
 from .proto_codec import data_field, encode_fields, parse_fields, vint_field
 from .key import KeyFetcher
 
@@ -334,6 +339,9 @@ def decrypt_mp4(body: bytes, key: bytes) -> bytes:
         raise ValueError("no init part of file")
 
     info = decrypt_init(parsed.moov)
+    # DecryptInit on the Go side mutates the init in place; mirror that so the
+    # written moov describes clear samples (no enca/sinf/tenc left behind).
+    remove_init_encryption(parsed.moov)
 
     out_segments: list[list] = []
     for segment in parsed.segments:

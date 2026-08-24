@@ -122,6 +122,8 @@ def _build_encrypted_media(plain: bytes) -> tuple[bytes, int]:
 
     Each sample is CBC-encrypted independently with a fresh zero IV, matching
     how the mock agent (and FairPlay full-sample cbcs) decrypts per sample.
+    The senc box carries one subsample record per sample -- like the real
+    Apple streams -- so regressions on the in-place decryption path surface.
     """
     half = len(plain) // 2
     parts = []
@@ -161,7 +163,15 @@ def _build_encrypted_media(plain: bytes) -> tuple[bytes, int]:
 
     trun_flags = 0x000201  # data_offset + sizes
     sizes = [half, half]
-    senc_payload = b"\x00\x00\x00\x00" + struct.pack(">I", 2) + b"\x11" * 8 + b"\x22" * 8
+    # flags bit 0x2 -> subsample records present; each sample carries its IV,
+    # an entry_count of 1 and one (clear=0, protected=size) record -- exactly
+    # like the real Apple ALAC senc boxes.
+    senc_payload = (
+        struct.pack(">I", 0x000002)
+        + struct.pack(">I", 2)
+        + b"\x11" * 8 + struct.pack(">H", 1) + struct.pack(">HI", 0, sizes[0])
+        + b"\x22" * 8 + struct.pack(">H", 1) + struct.pack(">HI", 0, sizes[1])
+    )
     tfhd = _box("tfhd", b"\x00\x00\x00\x00" + struct.pack(">I", 1))
     trun_payload = (
         struct.pack(">II", trun_flags, 2)
@@ -224,7 +234,53 @@ def test_runv2_end_to_end():
             moof = next(b for b in parsed.segments[0] if b.type == "moof")
             traf = moof.children[0]
             assert traf.find("senc") is None
-            _ = half, socket
         finally:
             server.shutdown()
             server.server_close()
+    _ = half, socket
+
+
+def test_cbcs_decrypt_sample_with_subsamples_is_in_place():
+    """Regiões de subsample precisam ser descriptografadas na própria amostra.
+
+    Slice de bytearray em Python é cópia; em Go é view sobre o array original.
+    Sem memoryview, os bytes decifrados ficavam no slice descartado e o
+    write_back gravava o ciphertext -- exatamente o que acontecia com os
+    streams reais da Apple (senc com um registro de subsample por amostra).
+    """
+
+    from amdl.iso_bmff.decrypt import SubSamplePattern
+    from amdl.runv2 import cbcs_decrypt_sample
+
+    class FakeTenc:
+        crypt_byte_block = 0
+        skip_byte_block = 0
+
+    class FakeSock:
+        """Agente de mentira: responde cada chunk com os bytes invertidos."""
+
+        def __init__(self) -> None:
+            self.queue = bytearray()
+
+        def sendall(self, data) -> None:
+            if len(data) != 4:  # ignora o cabeçalho u32 do tamanho
+                self.queue += bytes(data)[::-1]
+
+        def recv(self, n: int) -> bytes:
+            out = bytes(self.queue[:n])
+            del self.queue[:n]
+            return out
+
+    original = bytes(range(64))
+    sample = bytearray(original)
+    sock = FakeSock()
+
+    cbcs_decrypt_sample(
+        sock,
+        sample,
+        [SubSamplePattern(bytes_of_clear=0, bytes_of_protected=64)],
+        FakeTenc(),
+    )
+
+    assert bytes(sample) == original[::-1]
+    assert bytes(sample) != original
