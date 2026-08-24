@@ -313,14 +313,21 @@ def _run_v2_com_fallback_dispositivo(
                 raise
             usando_dispositivo = True
             print("Playlist da Web recusada pelo agente; repetindo com a playlist do dispositivo...")
-            from .rip import check_m3u8
+            from .rip import check_m3u8, extract_media
 
             url_dispositivo = check_m3u8(state_obj, track.id, "song")
             if not url_dispositivo.endswith(".m3u8"):
                 raise
             track.device_m3u8 = url_dispositivo
-            track.m3u8 = url_dispositivo
-            url_atual = url_dispositivo
+            # A playlist do dispositivo pode chegar como master (resolver
+            # para a variante media) ou já como media (usar direto).
+            try:
+                url_atual, _qualidade = extract_media(state_obj, url_dispositivo, False)
+            except RuntimeError as exc:
+                if "not of master type" not in str(exc):
+                    raise
+                url_atual = url_dispositivo
+            track.m3u8 = url_atual
 
 
 def rip_track(state_obj: State, track: Track, token: str, media_user_token: str) -> None:
