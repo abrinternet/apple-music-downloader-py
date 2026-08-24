@@ -66,7 +66,8 @@ HELP_TEXT_TEMPLATE = (
     "/alac <link> — Download rápido em ALAC\n"
     "/atmos <link> — Download rápido em Dolby Atmos\n"
     "/aac <link> — Download rápido em AAC\n"
-    "/quality <link> — Listar Hi-Res Lossless e faixas 24-bit/192 kHz\n"
+    "/quality <link> — Listar qualidades por faixa\n"
+    "/hires <link> — Verificar Hi-Res Lossless e 24-bit/192 kHz\n"
     "/status — Fila e pedido atual\n"
     "/cancel — Cancelar download ou envio atual\n"
     "/id — Mostrar seu ID\n\n"
@@ -217,6 +218,165 @@ def output_summary(output: str, max_runes: int) -> str:
     if len(output) > max_runes:
         output = "…" + output[-max_runes:]
     return output
+
+
+# --- relatório de qualidades (--quality-info) --------------------------------------
+
+TRACK_HEADER_RE = re.compile(r"Track (\d+) of (\d+):\s*(\d+)\.\s*(.+)")
+QUALITY_FIELDS = (
+    "AAC",
+    "Lossless",
+    "Hi-Res Lossless",
+    "24-bit/192 kHz",
+    "Dolby Atmos",
+    "Dolby Audio",
+)
+NOT_AVAILABLE = "Not Available"
+
+
+@dataclass
+class TrackQuality:
+    name: str
+    fields: dict[str, str] = field(default_factory=dict)
+
+
+def parse_quality_output(output: str) -> list[TrackQuality]:
+    """Extrai um registro por faixa do stdout de `--quality-info`."""
+    text = ANSI_RE.sub("", output)
+    tracks: list[TrackQuality] = []
+    current: TrackQuality | None = None
+    for line in text.splitlines():
+        header = TRACK_HEADER_RE.match(line.strip())
+        if header:
+            current = TrackQuality(name=header.group(4).strip())
+            tracks.append(current)
+            continue
+        name_only = re.match(r"^(\d+)\.\s+(.+)$", line.strip())
+        if current is not None:
+            if not current.name and name_only:
+                current.name = name_only.group(2).strip()
+                continue
+        if current is None:
+            continue
+        for key in QUALITY_FIELDS:
+            prefix = f"{key} :"
+            if line.startswith(key) and ":" in line:
+                value = line.split(":", 1)[1].strip()
+                current.fields[key] = "" if value == NOT_AVAILABLE else value
+                break
+    return tracks
+
+
+def _compact_quality(value: str) -> str:
+    if not value:
+        return ""
+    codec = value.split("|")[0].strip()
+    kbps = re.search(r"(\d+)\s*Kbps", value)
+    if kbps:
+        return f"{codec} {kbps.group(1)}k"
+    rate = re.search(r"(\d+)-bit/([\d.]+)\s*kHz", value)
+    if rate:
+        khz = float(rate.group(2))
+        pretty = f"{khz:.0f}" if khz.is_integer() else f"{khz:.1f}"
+        return f"{codec} {rate.group(1)}/{pretty}"
+    return codec
+
+
+def _quality_tags(track: TrackQuality) -> str:
+    parts = []
+    for key in ("AAC", "Lossless", "Hi-Res Lossless"):
+        tag = _compact_quality(track.fields.get(key, ""))
+        if tag:
+            parts.append(tag)
+    if track.fields.get("24-bit/192 kHz"):
+        parts.append("192 kHz ✨")
+    if track.fields.get("Dolby Atmos"):
+        parts.append("Atmos 🎬")
+    if track.fields.get("Dolby Audio"):
+        parts.append("Dolby Audio")
+    return " · ".join(parts)
+
+
+def render_quality_report(tracks: list[TrackQuality]) -> str:
+    if not tracks:
+        return "Nenhuma informação de qualidade foi encontrada para este link."
+    hires = sum(1 for t in tracks if t.fields.get("Hi-Res Lossless"))
+    k192 = sum(1 for t in tracks if t.fields.get("24-bit/192 kHz"))
+    atmos = sum(1 for t in tracks if t.fields.get("Dolby Atmos"))
+    lines = [
+        f"🎧 {len(tracks)} faixa(s) analisada(s)",
+        f"✨ Hi-Res: {hires} · 🏆 192 kHz: {k192} · 🎬 Atmos: {atmos}",
+        "",
+    ]
+    shown = tracks if len(tracks) <= 12 else tracks[:12]
+    for index, track in enumerate(shown, start=1):
+        tags = _quality_tags(track)
+        lines.append(f"{index:02d}. {track.name}")
+        if tags:
+            lines.append(f"     {tags}")
+    if len(tracks) > len(shown):
+        lines.append(f"… e mais {len(tracks) - len(shown)} faixa(s)")
+    return "\n".join(lines)
+
+
+def render_hires_report(tracks: list[TrackQuality]) -> str:
+    total = len(tracks)
+    if not total:
+        return "Nenhuma informação de qualidade foi encontrada para este link."
+    hires = [t for t in tracks if t.fields.get("Hi-Res Lossless")]
+    k192 = [t for t in tracks if t.fields.get("24-bit/192 kHz")]
+    atmos = [t for t in tracks if t.fields.get("Dolby Atmos")]
+
+    lines = [
+        f"🎧 {total} faixa(s) analisada(s)",
+        "",
+        f"✨ Hi-Res Lossless: {len(hires)} de {total}",
+        f"🏆 24-bit/192 kHz: {len(k192)} de {total}",
+        f"🎬 Dolby Atmos: {len(atmos)} de {total}",
+    ]
+
+    def section(title: str, items: list[TrackQuality], emoji: str) -> None:
+        lines.append("")
+        if not items:
+            lines.append(f"{emoji} {title}: nenhuma faixa")
+            return
+        lines.append(f"{emoji} {title}:")
+        limit = 15
+        for index, track in enumerate(items[:limit], start=1):
+            detail = ""
+            for key in (
+                "Hi-Res Lossless",
+                "24-bit/192 kHz",
+                "Dolby Atmos",
+                "Dolby Audio",
+                "Lossless",
+            ):
+                compacted = _compact_quality(track.fields.get(key, ""))
+                if compacted and (
+                    key != "Hi-Res Lossless" or title == "Hi-Res Lossless"
+                ) and (key != "24-bit/192 kHz" or title == "24-bit/192 kHz"):
+                    detail = compacted
+                    if key in title:
+                        break
+            lines.append(f"  {index:02d}. {track.name}" + (f" — {detail}" if detail else ""))
+        if len(items) > limit:
+            lines.append(f"  … e mais {len(items) - limit} faixa(s)")
+
+    section("Hi-Res Lossless", hires, "✨")
+    section("24-bit/192 kHz", k192, "🏆")
+    return "\n".join(lines)
+
+
+def extract_track_param(url: str) -> tuple[str, str]:
+    """Se o link tem ?i=<id>, devolve (id_da_faixa, storefront); senão ('', '')."""
+    parsed = urllib.parse.urlparse(url)
+    query = urllib.parse.parse_qs(parsed.query)
+    track_ids = query.get("i") or []
+    if not track_ids or not track_ids[0].isdigit():
+        return "", ""
+    parts = [p for p in parsed.path.split("/") if p]
+    storefront = parts[0] if parts else "us"
+    return track_ids[0], storefront
 
 
 def upload_file_limit(total: int, configured_limit: int) -> int:
@@ -401,6 +561,8 @@ class Bot:
         self.active: ActiveDownload | None = None
         self.sessions_lock = threading.Lock()
         self.sessions: dict[int, InteractiveSession] = {}
+        self.quality_lock = threading.Lock()
+        self.pending_quality: dict[int, tuple[str, str]] = {}
 
     # --- allowlist ---------------------------------------------------------
 
@@ -627,9 +789,14 @@ class Bot:
             if len(urls) != 1:
                 self.api.send_message(chat_id, "Use /quality seguido de um único link do Apple Music.")
                 return
-            threading.Thread(
-                target=self.handle_quality_info, args=(chat_id, urls[0]), daemon=True
-            ).start()
+            self.start_quality_analysis(chat_id, urls[0], "quality")
+            return
+        if command == "hires":
+            urls = extract_apple_music_urls(argument)
+            if len(urls) != 1:
+                self.api.send_message(chat_id, "Use /hires seguido de um único link do Apple Music.")
+                return
+            self.start_quality_analysis(chat_id, urls[0], "hires")
             return
         if command == "cancel":
             if self.cancel_active(user_id):
@@ -681,12 +848,28 @@ class Bot:
         if not allowed:
             return
         data = cb.get("data", "")
+        chat = message.get("chat") or {}
+
+        if data.startswith("qi:"):
+            with self.quality_lock:
+                pending = self.pending_quality.pop(chat.get("id", 0), None)
+            if pending is None:
+                return
+            url, mode = pending
+            if data == "qi:track":
+                track_id, storefront = extract_track_param(url)
+                if track_id:
+                    url = f"https://music.apple.com/{storefront}/song/x/{track_id}"
+            threading.Thread(
+                target=self.handle_quality_info, args=(chat.get("id", 0), url, mode),
+                daemon=True,
+            ).start()
+            return
 
         if data.startswith("main:"):
             self.handle_main_menu_cb(cb)
             return
 
-        chat = message.get("chat") or {}
         with self.sessions_lock:
             session = self.sessions.get(chat.get("id", 0))
         if session is None or session.user_id != sender.get("id", 0):
@@ -1226,7 +1409,7 @@ class Bot:
             text = f"Erro ao obter ajuda: {exc}"
         self.api.send_message(chat_id, text)
 
-    def handle_quality_info(self, chat_id: int, music_url: str) -> None:
+    def handle_quality_info(self, chat_id: int, music_url: str, mode: str = "quality") -> None:
         self.api.send_message(chat_id, "🔎 Analisando as qualidades disponíveis…")
         env = dict(os.environ, NO_COLOR="1", TERM="dumb")
         try:
@@ -1237,17 +1420,48 @@ class Bot:
                 stderr=subprocess.STDOUT,
                 env=env,
             )
-            out, _ = proc.communicate(timeout=300)
+            out, _ = proc.communicate(timeout=max(self.cfg.quality_info_timeout, 60))
             code = proc.returncode
         except (OSError, subprocess.TimeoutExpired) as exc:
             out, code = str(exc).encode(), 1
-        result = output_summary(out.decode(errors="replace"), MAX_TELEGRAM_MESSAGE * 3)
-        if code != 0:
+        text = out.decode(errors="replace")
+        tracks = parse_quality_output(text)
+        if code != 0 and not tracks:
+            result = output_summary(text, MAX_TELEGRAM_MESSAGE * 3)
             if not result:
                 result = f"exit {code}"
             self.api.send_message(chat_id, "❌ Não foi possível analisar o link:\n" + result)
             return
-        self.api.send_message(chat_id, "🎧 Qualidades disponíveis:\n\n" + result)
+        if mode == "hires":
+            report = render_hires_report(tracks)
+        else:
+            report = render_quality_report(tracks)
+        self.api.send_message(chat_id, report)
+
+    # --- /quality e /hires -------------------------------------------------------------
+
+    def start_quality_analysis(self, chat_id: int, url: str, mode: str) -> None:
+        track_id, _storefront = extract_track_param(url)
+        if not track_id:
+            threading.Thread(
+                target=self.handle_quality_info, args=(chat_id, url, mode), daemon=True
+            ).start()
+            return
+        with self.quality_lock:
+            self.pending_quality[chat_id] = (url, mode)
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "🎵 Só esta faixa", "callback_data": "qi:track"},
+                    {"text": "💿 Tudo", "callback_data": "qi:full"},
+                ]
+            ]
+        }
+        self.api.send_message_keyboard(
+            chat_id,
+            "Este link aponta para uma faixa dentro de um álbum.\nO que você quer analisar?",
+            keyboard,
+        )
 
     # --- worker -------------------------------------------------------------------------------
 

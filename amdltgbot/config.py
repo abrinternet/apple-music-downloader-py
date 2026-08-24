@@ -33,6 +33,7 @@ class Config:
     upload_retries: int = 3
     delete_after_upload: bool = False
     queue_size: int = 20
+    quality_info_timeout: int = 1800
 
 
 def env_or_default(name: str, fallback: str) -> str:
@@ -107,6 +108,7 @@ def load_config() -> Config:
         upload_retries=env_int("TELEGRAM_UPLOAD_RETRIES", 3, 0),
         delete_after_upload=env_bool("TELEGRAM_DELETE_AFTER_UPLOAD", False),
         queue_size=env_int("TELEGRAM_QUEUE_SIZE", 20, 1),
+        quality_info_timeout=env_int("TELEGRAM_QUALITY_INFO_TIMEOUT", 1800, 60),
     )
 
 
