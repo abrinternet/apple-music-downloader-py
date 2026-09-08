@@ -30,7 +30,7 @@ class Config:
     default_format: str = "alac"
     max_upload_bytes: int = 0
     max_files_per_job: int = 0
-    upload_retries: int = 3
+    upload_retries: int = 50
     delete_after_upload: bool = False
     queue_size: int = 20
     quality_info_timeout: int = 1800

@@ -44,7 +44,7 @@ from .interactive import (
 log = logging.getLogger("amdltgbot")
 
 MAX_URLS_PER_JOB = 10
-MAX_UPLOAD_RETRY_DELAY = 30.0
+MAX_UPLOAD_RETRY_DELAY = 120.0
 MANIFEST_POLL_INTERVAL = 1.0
 
 APPLE_MUSIC_URL_RE = re.compile(
@@ -1573,11 +1573,16 @@ class Bot:
             pump_thread.start()
 
             def heartbeat() -> None:
-                while not heartbeat_stop.wait(5.0):
+                hb_interval = 15.0
+                hb_max_interval = 120.0
+                while not heartbeat_stop.wait(hb_interval):
                     try:
                         self.api.send_chat_action(job.chat_id, "typing")
+                        hb_interval = 15.0  # reset on success
                     except Exception:
-                        pass
+                        # Back off on consecutive failures to avoid
+                        # contributing to Telegram rate-limiting.
+                        hb_interval = min(hb_interval * 2, hb_max_interval)
 
             hb_thread = threading.Thread(target=heartbeat, daemon=True)
             hb_thread.start()
@@ -1759,6 +1764,11 @@ class Bot:
     ) -> Exception | None:
         err: Exception | None = None
         for attempt in range(self.cfg.upload_retries + 1):
+            # Verify the file still exists before each attempt; if it has
+            # been removed (e.g. by another process or a race condition)
+            # there is no point retrying.
+            if not Path(path).is_file():
+                return FileNotFoundError(f"file vanished before upload: {path}")
             try:
                 self.api.send_chat_action(chat_id, "upload_document")
                 self.api.send_document(chat_id, path, caption)

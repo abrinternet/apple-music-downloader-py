@@ -7,13 +7,19 @@ multipart uploads with retry-friendly errors, inline keyboard helpers.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
+
+log = logging.getLogger("amdltgbot.client")
+
+# Size of chunks used when streaming file uploads (64 KiB).
+_UPLOAD_CHUNK_SIZE = 65_536
 
 MAX_TELEGRAM_MESSAGE = 4096
 MAX_TELEGRAM_CAPTION = 1024
@@ -48,7 +54,13 @@ class TelegramClient:
         self.token = token
         self.client = httpx.Client(timeout=45.0, trust_env=True)
         self.upload_client = httpx.Client(
-            timeout=httpx.Timeout(60 * 60.0), trust_env=True
+            timeout=httpx.Timeout(60 * 60.0),
+            limits=httpx.Limits(
+                max_connections=2,
+                max_keepalive_connections=1,
+                keepalive_expiry=30.0,
+            ),
+            trust_env=True,
         )
 
     def close(self) -> None:
@@ -145,16 +157,27 @@ class TelegramClient:
         )
 
     def send_document(self, chat_id: int, path: str, caption: str, stop_event=None) -> None:
-        """Multipart upload of a document (port of sendDocument)."""
+        """Multipart upload of a document using streaming (port of sendDocument).
+
+        Files are read in 64 KiB chunks to avoid loading them entirely into
+        memory.  The previous implementation called ``Path(path).read_bytes()``
+        which, for a 200 MB FLAC file, consumed ~400 MB of RAM (original bytes
+        + the joined copy).  With the container's 512 MB memory limit, this
+        caused OOM kills after uploading many tracks in a row.
+        """
         if stop_event is not None and stop_event.is_set():
             raise InterruptedError("stopped")
         boundary = uuid.uuid4().hex
-        body = _build_upload_body(boundary, chat_id, path, caption)
+        file_size = Path(path).stat().st_size
+        content_length = _streaming_body_length(boundary, chat_id, path, caption, file_size)
         try:
             response = self.upload_client.post(
                 self.endpoint("sendDocument"),
-                content=body,
-                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                content=_streaming_upload_body(boundary, chat_id, path, caption),
+                headers={
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                    "Content-Length": str(content_length),
+                },
             )
         except httpx.HTTPError as exc:
             raise self._redact(exc) from exc
@@ -216,20 +239,21 @@ def _urlencode(values: dict[str, str]) -> bytes:
     return "&".join(f"{k}={v}" for k, v in pairs).encode()
 
 
-def _build_upload_body(boundary: str, chat_id: int, path: str, caption: str) -> bytes:
+def _multipart_field(boundary: str, name: str, value: str) -> bytes:
+    return (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+        f"{value}\r\n"
+    ).encode()
+
+
+def _multipart_preamble(boundary: str, chat_id: int, path: str, caption: str) -> bytes:
+    """Build all multipart parts *before* the file content."""
     parts: list[bytes] = []
-
-    def field(name: str, value: str) -> bytes:
-        return (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
-            f"{value}\r\n"
-        ).encode()
-
-    parts.append(field("chat_id", str(chat_id)))
+    parts.append(_multipart_field(boundary, "chat_id", str(chat_id)))
     if caption:
-        parts.append(field("caption", caption))
-    parts.append(field("disable_content_type_detection", "true"))
+        parts.append(_multipart_field(boundary, "caption", caption))
+    parts.append(_multipart_field(boundary, "disable_content_type_detection", "true"))
     filename = os.path.basename(path)
     parts.append(
         (
@@ -238,9 +262,38 @@ def _build_upload_body(boundary: str, chat_id: int, path: str, caption: str) -> 
             f"Content-Type: application/octet-stream\r\n\r\n"
         ).encode()
     )
-    parts.append(Path(path).read_bytes())
-    parts.append(f"\r\n--{boundary}--\r\n".encode())
     return b"".join(parts)
+
+
+def _multipart_epilogue(boundary: str) -> bytes:
+    return f"\r\n--{boundary}--\r\n".encode()
+
+
+def _streaming_body_length(
+    boundary: str, chat_id: int, path: str, caption: str, file_size: int
+) -> int:
+    """Calculate the exact Content-Length without reading the file."""
+    preamble = _multipart_preamble(boundary, chat_id, path, caption)
+    epilogue = _multipart_epilogue(boundary)
+    return len(preamble) + file_size + len(epilogue)
+
+
+def _streaming_upload_body(
+    boundary: str, chat_id: int, path: str, caption: str
+) -> Iterator[bytes]:
+    """Yield the multipart body in chunks, streaming the file from disk.
+
+    Memory usage stays at ~64 KiB regardless of file size, compared to the
+    previous ``_build_upload_body`` which loaded the entire file into RAM.
+    """
+    yield _multipart_preamble(boundary, chat_id, path, caption)
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(_UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            yield chunk
+    yield _multipart_epilogue(boundary)
 
 
 def split_message(message: str, limit: int) -> list[str]:

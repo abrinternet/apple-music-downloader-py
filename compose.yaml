@@ -142,7 +142,7 @@ services:
       TELEGRAM_DELETE_AFTER_UPLOAD: "1"
       TELEGRAM_DEFAULT_FORMAT: alac
       TELEGRAM_MAX_FILES_PER_JOB: "0"
-      TELEGRAM_UPLOAD_RETRIES: "3"
+      TELEGRAM_UPLOAD_RETRIES: "50"
       # Para servidor local da Telegram Bot API (permite envio de até 2000 MB / 2 GB):
       # TELEGRAM_API_BASE_URL: http://telegram-bot-api:8081
       # TELEGRAM_MAX_UPLOAD_MB: "2000"
