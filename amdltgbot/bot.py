@@ -1778,7 +1778,22 @@ class Bot:
             if send_err:
                 log.warning("Could not send %s to Telegram: %s", name, send_err)
                 uploads.failed += 1
+                uploads.consecutive_failures += 1
+                if uploads.consecutive_failures >= self.cfg.max_consecutive_upload_failures:
+                    uploads.uploads_stopped = True
+                    uploads.processed += 1
+                    self._set_upload_progress(
+                        downloading, uploads.processed, uploads.sent, total,
+                        "Uploads pausados após falhas consecutivas do Telegram.",
+                    )
+                    log.error(
+                        "Pausing Telegram uploads after %d consecutive failures; "
+                        "completed files remain on disk",
+                        uploads.consecutive_failures,
+                    )
+                    return
             else:
+                uploads.consecutive_failures = 0
                 uploads.sent += 1
                 if self.cfg.delete_after_upload:
                     remove_err = remove_uploaded_media(self.cfg.download_root, path)
@@ -1821,6 +1836,9 @@ class Bot:
             try:
                 if cancel.is_set() or self.stop_event.is_set():
                     return InterruptedError("cancelled")
+                # Exercise the complete Telegram API path before copying a
+                # potentially large document into the local API temp area.
+                self.api.send_chat_action(chat_id, "upload_document")
                 self.api.send_document(chat_id, path, caption, stop_event=cancel)
                 return None
             except Exception as exc:  # noqa: BLE001
@@ -1857,7 +1875,12 @@ class Bot:
             summary += f"\nAcima do limite de {self.cfg.max_upload_bytes // (1024 * 1024)} MB: {uploads.too_large}."
         not_attempted = total - uploads.attempted
         if not_attempted > 0:
-            summary += f"\nNão enviados pelo limite administrativo configurado: {not_attempted}."
+            if uploads.uploads_stopped:
+                summary += f"\nNão tentados após falhas consecutivas do Telegram: {not_attempted}."
+            else:
+                summary += f"\nNão enviados pelo limite administrativo configurado: {not_attempted}."
+        if uploads.uploads_stopped:
+            summary += "\nUploads pausados; os arquivos concluídos foram preservados para nova tentativa."
         if uploads.failed > 0:
             summary += f"\nFalhas de envio/processamento: {uploads.failed}."
         if self.cfg.delete_after_upload:
@@ -1901,6 +1924,8 @@ class UploadState:
         self.deleted = 0
         self.too_large = 0
         self.failed = 0
+        self.consecutive_failures = 0
+        self.uploads_stopped = False
         self.delete_failed = 0
         self.announced = False
         self.exact_manifest = False

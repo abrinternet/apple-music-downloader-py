@@ -31,6 +31,7 @@ class Config:
     max_upload_bytes: int = 0
     max_files_per_job: int = 0
     upload_retries: int = 50
+    max_consecutive_upload_failures: int = 2
     delete_after_upload: bool = False
     queue_size: int = 20
     quality_info_timeout: int = 1800
@@ -107,6 +108,9 @@ def load_config() -> Config:
         max_upload_bytes=max_upload_mb * 1024 * 1024,
         max_files_per_job=env_int("TELEGRAM_MAX_FILES_PER_JOB", 0, 0),
         upload_retries=env_int("TELEGRAM_UPLOAD_RETRIES", 3, 0),
+        max_consecutive_upload_failures=env_int(
+            "TELEGRAM_MAX_CONSECUTIVE_UPLOAD_FAILURES", 2, 1
+        ),
         delete_after_upload=env_bool("TELEGRAM_DELETE_AFTER_UPLOAD", False),
         queue_size=env_int("TELEGRAM_QUEUE_SIZE", 20, 1),
         job_timeout=env_int("TELEGRAM_JOB_TIMEOUT", 21600, 60),
