@@ -665,7 +665,9 @@ class Bot:
                 updates = self._get_updates_with_stop(offset)
             except TelegramAPIError as exc:
                 if exc.code in (401, 404):
-                    raise
+                    log.error("Telegram credentials rejected: %s", exc)
+                    self.stop_event.wait(30)
+                    continue
                 log.warning("Telegram polling error: %s", exc)
                 self.stop_event.wait(retry_delay)
                 retry_delay = min(retry_delay * 2, 15.0)
@@ -691,6 +693,8 @@ class Bot:
                         self.handle_message(message)
                 except InterruptedError:
                     return
+                except Exception:
+                    log.exception("Could not handle Telegram update %s; polling continues", update_id)
         self.cancel_any_active()
 
     def _get_updates_with_stop(self, offset: int) -> list[dict]:
@@ -1412,6 +1416,7 @@ class Bot:
     def handle_quality_info(self, chat_id: int, music_url: str, mode: str = "quality") -> None:
         self.api.send_message(chat_id, "🔎 Analisando as qualidades disponíveis…")
         env = dict(os.environ, NO_COLOR="1", TERM="dumb")
+        proc = None
         try:
             proc = subprocess.Popen(
                 [self.cfg.downloader, "--quality-info", music_url],
@@ -1419,10 +1424,14 @@ class Bot:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 env=env,
+                start_new_session=sys.platform != "win32",
             )
             out, _ = proc.communicate(timeout=max(self.cfg.quality_info_timeout, 60))
             code = proc.returncode
         except (OSError, subprocess.TimeoutExpired) as exc:
+            if proc is not None:
+                self._kill_process_tree(proc)
+                proc.communicate()
             out, code = str(exc).encode(), 1
         text = out.decode(errors="replace")
         tracks = parse_quality_output(text)
@@ -1471,17 +1480,43 @@ class Bot:
                 job = self.queue.get(timeout=0.5)
             except Empty:
                 continue
-            self.run_download(job)
+            try:
+                self.run_download(job)
+            except Exception:
+                log.exception("Download job failed unexpectedly; queue remains available")
+                try:
+                    self.api.send_message(job.chat_id, "❌ O pedido falhou. A fila continua disponível; tente novamente.")
+                except Exception:
+                    log.warning("Could not notify user about failed job")
+            finally:
+                self.queue.task_done()
 
     def run_download(self, job: DownloadJob) -> None:
         stop = threading.Event()
         active = ActiveDownload(job=job, cancel=stop, started=time.monotonic(), stage="download")
         with self.active_lock:
             self.active = active
-
+        watchdog_done = threading.Event()
+        timed_out = threading.Event()
+        def watchdog():
+            deadline = active.started + self.cfg.job_timeout
+            while not watchdog_done.wait(0.1):
+                if time.monotonic() >= deadline:
+                    timed_out.set()
+                    stop.set()
+                    return
+                if self.stop_event.is_set():
+                    stop.set()
+                    return
+        watcher = threading.Thread(target=watchdog, daemon=True)
+        watcher.start()
         try:
             self._run_download_inner(job, active)
         finally:
+            watchdog_done.set()
+            watcher.join(timeout=1)
+            if timed_out.is_set():
+                log.error("Job exceeded timeout (%ss)", self.cfg.job_timeout)
             with self.active_lock:
                 if self.active is active:
                     self.active = None
@@ -1512,17 +1547,19 @@ class Bot:
 
     @staticmethod
     def _kill_process_tree(process: subprocess.Popen) -> None:
-        if process.poll() is not None:
-            return
         try:
             if sys.platform == "win32":
                 process.kill()
             else:
                 import signal as signal_mod
 
-                os.killpg(os.getpgid(process.pid), signal_mod.SIGTERM)
+                os.killpg(process.pid, signal_mod.SIGKILL)
         except OSError:
             pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            log.error("Downloader did not exit after forced cancellation")
 
     def _run_download_inner(self, job: DownloadJob, active: ActiveDownload) -> None:
         stop = active.cancel
@@ -1551,6 +1588,8 @@ class Bot:
             self.api.send_message(job.chat_id, f"❌ Não foi possível preparar o diretório temporário: {exc}")
             return
 
+        process = None
+        heartbeat_stop = threading.Event()
         try:
             manifest_path = str(Path(job_temp_dir) / "output-manifest.json")
 
@@ -1565,8 +1604,8 @@ class Bot:
 
             def pump_output() -> None:
                 assert process.stdout is not None
-                for line in iter(process.stdout.readline, b""):
-                    output.write(line)
+                for chunk in iter(lambda: process.stdout.read1(65536), b""):
+                    output.write(chunk)
                 process.stdout.close()
 
             pump_thread = threading.Thread(target=pump_output, daemon=True)
@@ -1620,6 +1659,7 @@ class Bot:
             heartbeat_stop.set()
             run_thread.join(timeout=5)
             run_code = process.returncode
+            log.info("Downloader exited: status=%s, elapsed=%.1fs", run_code, time.monotonic() - active.started)
             pump_thread.join(timeout=5)
 
             if cancelled or stop.is_set() or self.stop_event.is_set():
@@ -1640,6 +1680,10 @@ class Bot:
                 uploads.exact_manifest = True
             self.upload_available_files(job, uploads, files, before, False, stop)
 
+            if stop.is_set() or self.stop_event.is_set():
+                self.api.send_message(job.chat_id, "🛑 Envio cancelado. Arquivos sem confirmação foram preservados.")
+                return
+
             run_err = None
             if run_code != 0:
                 run_err = RuntimeError(f"exit status {run_code}")
@@ -1653,6 +1697,9 @@ class Bot:
                 self.api.send_message(job.chat_id, message)
             self.send_download_summary(job, uploads, run_err)
         finally:
+            heartbeat_stop.set()
+            if process is not None:
+                self._kill_process_tree(process)
             shutil.rmtree(job_temp_dir, ignore_errors=True)
 
     def upload_available_files(
@@ -1665,6 +1712,8 @@ class Bot:
         cancel: threading.Event,
     ) -> None:
         for path in files:
+            if cancel.is_set() or self.stop_event.is_set():
+                return
             uploads.known[path] = True
             if uploads.handled.get(path):
                 continue
@@ -1770,8 +1819,9 @@ class Bot:
             if not Path(path).is_file():
                 return FileNotFoundError(f"file vanished before upload: {path}")
             try:
-                self.api.send_chat_action(chat_id, "upload_document")
-                self.api.send_document(chat_id, path, caption)
+                if cancel.is_set() or self.stop_event.is_set():
+                    return InterruptedError("cancelled")
+                self.api.send_document(chat_id, path, caption, stop_event=cancel)
                 return None
             except Exception as exc:  # noqa: BLE001
                 err = exc

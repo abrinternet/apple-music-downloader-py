@@ -7,6 +7,7 @@ multipart uploads with retry-friendly errors, inline keyboard helpers.
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import os
 import re
@@ -54,7 +55,7 @@ class TelegramClient:
         self.token = token
         self.client = httpx.Client(timeout=45.0, trust_env=True)
         self.upload_client = httpx.Client(
-            timeout=httpx.Timeout(60 * 60.0),
+            timeout=httpx.Timeout(connect=15.0, read=900.0, write=60.0, pool=15.0),
             limits=httpx.Limits(
                 max_connections=2,
                 max_keepalive_connections=1,
@@ -171,14 +172,9 @@ class TelegramClient:
         file_size = Path(path).stat().st_size
         content_length = _streaming_body_length(boundary, chat_id, path, caption, file_size)
         try:
-            response = self.upload_client.post(
-                self.endpoint("sendDocument"),
-                content=_streaming_upload_body(boundary, chat_id, path, caption),
-                headers={
-                    "Content-Type": f"multipart/form-data; boundary={boundary}",
-                    "Content-Length": str(content_length),
-                },
-            )
+            response = asyncio.run(self._upload_document(
+                boundary, chat_id, path, caption, content_length, stop_event
+            ))
         except httpx.HTTPError as exc:
             raise self._redact(exc) from exc
         try:
@@ -195,6 +191,30 @@ class TelegramClient:
                 payload.get("description", ""),
                 retry_after,
             )
+
+    async def _upload_document(self, boundary, chat_id, path, caption, content_length, stop_event):
+        # Each transfer owns its connection. Cancellation interrupts network waits
+        # without closing the polling client or leaving an upload thread behind.
+        async def body():
+            for chunk in _streaming_upload_body(boundary, chat_id, path, caption, stop_event):
+                yield chunk
+
+        async with httpx.AsyncClient(timeout=self.upload_client.timeout, trust_env=True) as client:
+            task = asyncio.create_task(client.post(
+                self.endpoint("sendDocument"), content=body(),
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                         "Content-Length": str(content_length)},
+            ))
+            try:
+                while not task.done():
+                    if stop_event is not None and stop_event.is_set():
+                        raise InterruptedError("cancelled")
+                    await asyncio.wait({task}, timeout=0.1)
+                return await task
+            finally:
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     def send_message_keyboard(
         self, chat_id: int, text: str, keyboard: dict | None
@@ -279,7 +299,7 @@ def _streaming_body_length(
 
 
 def _streaming_upload_body(
-    boundary: str, chat_id: int, path: str, caption: str
+    boundary: str, chat_id: int, path: str, caption: str, stop_event=None
 ) -> Iterator[bytes]:
     """Yield the multipart body in chunks, streaming the file from disk.
 
@@ -289,6 +309,8 @@ def _streaming_upload_body(
     yield _multipart_preamble(boundary, chat_id, path, caption)
     with open(path, "rb") as fh:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError("cancelled")
             chunk = fh.read(_UPLOAD_CHUNK_SIZE)
             if not chunk:
                 break

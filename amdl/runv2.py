@@ -156,6 +156,8 @@ def _read_next_fragment(stream) -> list[Box] | None:
     while True:
         box = read_one_box(stream, allow_eof=True)
         if box is None:
+            if frag:
+                raise EOFError("fragment ended before mdat")
             return None
         if box.type in ("moof", "emsg", "prft"):
             frag.append(box)

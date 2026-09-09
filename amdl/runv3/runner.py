@@ -12,12 +12,10 @@ import os
 import struct
 import subprocess
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
 
-from ..iso_bmff import decode_file
 from ..iso_bmff.decrypt import (
     NoSencError,
     decrypt_init,
@@ -309,59 +307,45 @@ def extract_kid_base64(playlist_url: str, mvmode: bool) -> tuple[str, str, str]:
 # --- download + decrypt -----------------------------------------------------------
 
 
-def extsong(url: str) -> bytes:
-    """Download a file into memory with a progress bar."""
-    from tqdm import tqdm
+def decrypt_mp4_stream(source, output, key: bytes) -> None:
+    from ..runv2 import _read_init_segment, _read_next_fragment
 
-    from .. import httputil
-
-    buffer = bytearray()
-    with httputil.client.stream("GET", url) as resp:
-        total = int(resp.headers.get("Content-Length") or 0)
-        print("Downloading...")
-        with tqdm(total=total or None, unit="B", unit_scale=True, leave=False) as bar:
-            for chunk in resp.iter_bytes(chunk_size=65536):
-                buffer.extend(chunk)
-                bar.update(len(chunk))
-    return bytes(buffer)
+    init, _ = _read_init_segment(source)
+    moov = next(box for box in init if box.type == "moov")
+    info = decrypt_init(moov)
+    remove_init_encryption(moov)
+    for box in init:
+        box.encode_into(output)
+    count = 0
+    while True:
+        fragment = _read_next_fragment(source)
+        if fragment is None:
+            break
+        try:
+            decrypt_segment(fragment, info, key)
+        except NoSencError:
+            pass
+        for box in fragment:
+            box.encode_into(output)
+        count += 1
+    if not count:
+        raise ValueError("file is not fragmented")
 
 
 def decrypt_mp4(body: bytes, key: bytes) -> bytes:
-    """Decrypt a fragmented MP4 (CENC/CBCS) using the license content key.
-
-    Mirrors runv3.DecryptMP4: segments without a senc box are copied through
-    unmodified.
-    """
-    parsed = decode_file(body)
-    if not parsed.is_fragmented:
-        raise ValueError("file is not fragmented")
-    if parsed.moov is None:
-        raise ValueError("no init part of file")
-
-    info = decrypt_init(parsed.moov)
-    # DecryptInit on the Go side mutates the init in place; mirror that so the
-    # written moov describes clear samples (no enca/sinf/tenc left behind).
-    remove_init_encryption(parsed.moov)
-
-    out_segments: list[list] = []
-    for segment in parsed.segments:
-        try:
-            decrypt_segment(segment, info, key)
-        except NoSencError:
-            # Samples may be unencrypted for part of the stream; copy as-is.
-            pass
-        out_segments.append(segment)
-
+    """In-memory compatibility helper; production uses the streaming variant."""
     import io
+    output = io.BytesIO()
+    decrypt_mp4_stream(io.BytesIO(body), output, key)
+    return output.getvalue()
 
-    buf = io.BytesIO()
-    if parsed.ftyp is not None:
-        parsed.ftyp.encode_into(buf)
-    parsed.moov.encode_into(buf)
-    for segment in out_segments:
-        for box in segment:
-            box.encode_into(buf)
-    return buf.getvalue()
+
+def download_to(url: str, output) -> None:
+    from .. import httputil
+    with httputil.client.stream("GET", url) as response:
+        response.raise_for_status()
+        for chunk in response.iter_bytes(chunk_size=65536):
+            output.write(chunk)
 
 
 def run(
@@ -409,17 +393,13 @@ def run(
     if mvmode:
         return "1:" + keystr + ";" + fileurl
 
-    body = extsong(fileurl)
-    print("Downloaded")
-    try:
-        decrypted = decrypt_mp4(body, keybt)
-    except Exception:
-        print("Decryption failed")
-        raise
-    print("Decrypted")
-
     Path(trackpath).parent.mkdir(parents=True, exist_ok=True)
-    Path(trackpath).write_bytes(decrypted)
+    with tempfile.TemporaryFile() as encrypted:
+        download_to(fileurl, encrypted)
+        encrypted.seek(0)
+        with open(trackpath, "wb") as output:
+            decrypt_mp4_stream(encrypted, output, keybt)
+    print("Decrypted")
     return ""
 
 
@@ -432,23 +412,11 @@ def ext_mv_data(key_and_urls: str, save_path: str) -> None:
     fd, tmp_path = tempfile.mkstemp(suffix=".mp4", prefix="enc_mv_data-")
     os.close(fd)
     try:
-        def fetch(index_url: tuple[int, str]) -> tuple[int, bytes]:
-            index, url = index_url
-            resp = httpx.get(url, timeout=60.0, follow_redirects=True)
-            if resp.status_code != 200:
-                raise RuntimeError(f"segment {index}: HTTP {resp.status_code}")
-            return index, resp.content
-
-        with ThreadPoolExecutor(max_workers=10) as pool:
-            results = list(pool.map(fetch, enumerate(urls)))
-        results.sort(key=lambda item: item[0])
-
-        from tqdm import tqdm
-
-        with open(tmp_path, "wb") as fh, tqdm(unit="B", unit_scale=True, leave=False) as bar:
-            for _index, data in results:
-                fh.write(data)
-                bar.update(len(data))
+        # Ordered streaming bounds memory even when the first segment stalls.
+        # Never accumulate the entire music video in futures or byte arrays.
+        with open(tmp_path, "wb") as fh:
+            for url in urls:
+                download_to(url, fh)
         print("\nDownloaded.")
 
         # mp4decrypt writes next to its working directory, so run it from the

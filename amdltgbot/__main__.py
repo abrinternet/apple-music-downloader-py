@@ -25,6 +25,8 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%SZ",
     )
+    # HTTP request URLs include the bot token. Keep routine polling out of logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     cfg: Config = load_config()
 
     stop_event = threading.Event()
@@ -68,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
             logging.error("Telegram bot stopped: %s", exc)
         except InterruptedError:
             pass
+        except Exception:
+            logging.exception("Telegram bot connection failed; retrying")
         finally:
             api.close()
 

@@ -480,50 +480,64 @@ def patch_in_place(data: bytearray, offset: int, size: int, body_end_bit: int) -
     return True
 
 
+def _read_moov(fh) -> bytes:
+    fh.seek(0, 2)
+    end = fh.tell()
+    pos = 0
+    while pos + 8 <= end:
+        fh.seek(pos)
+        header = fh.read(8)
+        size, kind = struct.unpack(">I4s", header)
+        header_size = 8
+        if size == 1:
+            header += fh.read(8)
+            size = struct.unpack(">Q", header[8:])[0]
+            header_size = 16
+        elif size == 0:
+            size = end - pos
+        if size < header_size or size > end - pos:
+            raise ValueError("invalid MP4 box size")
+        if kind == b"moov":
+            if size > 64 << 20:
+                raise ValueError("moov metadata exceeds 64 MiB")
+            return header + fh.read(size - header_size)
+        pos += size
+    raise ValueError("no moov atom (not an MP4/M4A?)")
+
+
 def run(path: str, force: bool = False, out_path: str = "") -> None:
-    data = bytearray(Path(path).read_bytes())
-    dst = out_path or path
-    try:
-        tracks = find_alac_tracks(data)
-    except (ValueError, struct.error) as exc:
-        raise RuntimeError(str(exc)) from exc
+    import shutil
+
+    with open(path, "rb") as source:
+        tracks = find_alac_tracks(_read_moov(source))
     if not tracks:
         return
-
+    dst = out_path or path
+    if Path(dst).resolve() != Path(path).resolve():
+        shutil.copyfile(path, dst)
     patched = 0
-    report: list[tuple[int, int, int, int, int]] = []
-
-    for td in tracks:
-        params = td.params
-        print(
-            f"Track #{td.track_id}: {len(td.locs)} packets, "
-            f"max_samples_per_frame={params.max_samples_per_frame} "
-            f"sample_size={params.sample_size} channels={params.channels}"
-        )
-        for idx, loc in enumerate(td.locs):
-            pkt = bytes(data[loc.offset : loc.offset + loc.size])
-            body_end = find_body_end_bit(pkt, params)
-            if body_end < 0:
-                continue
-            if body_end == loc.size * 8:
-                continue
-            br = BitReader(pkt)
-            try:
-                br.skip(body_end)
-                if br.left() >= 3 and br.show(3) == 7:
+    with open(dst, "r+b") as fh:
+        fh.seek(0, 2)
+        file_size = fh.tell()
+        for td in tracks:
+            for loc in td.locs:
+                if loc.size <= 0 or loc.size > 16 << 20 or loc.offset < 0 or loc.offset + loc.size > file_size:
+                    raise ValueError("invalid ALAC packet location")
+                fh.seek(loc.offset)
+                packet = bytearray(fh.read(loc.size))
+                body_end = find_body_end_bit(packet, td.params)
+                if body_end < 0 or body_end == loc.size * 8:
                     continue
-            except _Eof:
-                continue
-            if patch_in_place(data, loc.offset, loc.size, body_end):
-                patched += 1
-                report.append((td.track_id, idx, loc.offset, loc.size, body_end))
-
-    if patched > 0 or force:
-        Path(dst).write_bytes(bytes(data))
+                br = BitReader(packet)
+                try:
+                    br.skip(body_end)
+                    if br.left() >= 3 and br.show(3) == 7:
+                        continue
+                except _Eof:
+                    continue
+                if patch_in_place(packet, 0, loc.size, body_end):
+                    fh.seek(loc.offset)
+                    fh.write(packet)
+                    patched += 1
+    if patched or force:
         print(f"Patched {patched} packet(s).")
-        for track_id, idx, off, size, body_end in report:
-            print(
-                f"  track #{track_id} packet #{idx}  "
-                f"file_offset={hex(off)}  size={size}  "
-                f"body_ends_at_bit={body_end}  tail_overwritten=[{body_end}..{size * 8})"
-            )

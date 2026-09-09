@@ -82,7 +82,24 @@ O `compose.yaml` mantém a topologia do deploy Go: o serviço `wrapper`
 não-root (`10001`), read-only, sem capabilities.
 
 
-## Estrutura
+## Estabilidade e limites do bot
+
+`TELEGRAM_JOB_TIMEOUT` limita cada pedido (download e envio) em segundos;
+o padrão é `21600` (6 horas). `/cancel` interrompe inclusive uma conexão de
+upload sem resposta. Falhas de um pedido ou de uma resposta do Telegram não
+encerram o atendimento nem o trabalhador da fila. Arquivos só são removidos
+depois da confirmação de envio.
+
+O processamento ALAC lê os metadados e um pacote por vez; AAC/Widevine é
+decodificado por fragmento, e segmentos de vídeo são gravados diretamente
+em disco, em ordem. O espaço temporário continua necessário em
+`TELEGRAM_DOWNLOADER_TEMP_DIR` (por padrão `/downloads/.tmp`).
+
+No `deploy/telegram-server/update_bots.sh` do repositório Go, use
+`APPLE_MUSIC_BOT_ENGINE=python` para selecionar `apple-music-telegram-bot-py`.
+`APPLE_MUSIC_BOT_SOURCE` permite fixar uma tag ou digest específico.
+
+## Estrutura dos pacotes
 
 - `amdl/` — CLI: `pipeline.py` (fluxos de download), `runv2.py` (ALAC via TCP),
   `runv3/` (Widevine CDM puro em Python + runner), `iso_bmff/` (parser/decrypt MP4),

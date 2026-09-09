@@ -111,7 +111,8 @@ def test_snapshot_and_changed(tmp_path):
     (tmp_path / ".tmp" / "b.m4a").write_bytes(b"y")
     before = snapshot_files(str(tmp_path))
     assert any(p.endswith("a.m4a") for p in before)
-    assert not any(".tmp" in p for p in before)
+    from pathlib import Path
+    assert not any(".tmp" in Path(p).relative_to(tmp_path).parts for p in before)
     assert changed_media_files(str(tmp_path), {}) or True
 
 
@@ -139,7 +140,7 @@ def _fake_bot(tmp_path, delete_after_upload):
         def send_message(self, chat_id, message):
             self.messages.append(message)
 
-        def send_document(self, chat_id, path, caption):
+        def send_document(self, chat_id, path, caption, stop_event=None):
             self.sent.append(path)
 
     cfg = Config(
@@ -227,7 +228,7 @@ def test_send_failure_keeps_file_for_retry(tmp_path, monkeypatch):
         def send_message(self, *a):
             pass
 
-        def send_document(self, *a):
+        def send_document(self, *a, **kw):
             raise RuntimeError("telegram fora do ar")
 
     bot.api = FailingClient()
