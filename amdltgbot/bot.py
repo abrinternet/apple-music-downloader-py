@@ -549,10 +549,10 @@ def describe_audio_file(path: str) -> tuple[str, Exception | None]:
     parts = [f"Qualidade: {quality}"]
     if bits > 0:
         parts.append(f"Profundidade: {bits}-bit")
-    if bitrate > 0:
-        parts.append(f"Taxa de bits: {bitrate / 1000:.0f} kbps")
     if rate > 0:
         parts.append(f"Amostragem: {rate / 1000:.1f} kHz")
+    if bitrate > 0:
+        parts.append(f"Taxa de bits: {bitrate / 1000:.0f} kbps")
     return "\n".join(parts), None
 
 
@@ -1430,7 +1430,7 @@ class Bot:
                 if out
                 else f"Erro ao obter ajuda: exit {proc.returncode}"
             )
-        except OSError as exc:
+        except (OSError, subprocess.TimeoutExpired) as exc:
             text = f"Erro ao obter ajuda: {exc}"
         self.api.send_message(chat_id, text)
 
@@ -1852,12 +1852,12 @@ class Bot:
             name = Path(path).name
             total = upload_file_limit(len(uploads.known), self.cfg.max_files_per_job)
             self._set_upload_progress(downloading, uploads.processed, uploads.sent, total, name)
-            caption = f"📤 {uploads.attempted}/{total} — {name}"
+            caption = ""
             description, err = describe_audio_file(path)
             if err:
                 log.warning("Could not inspect audio quality for %s: %s", name, err)
             elif description:
-                caption += "\n" + description
+                caption = description
             caption = truncate_runes(caption, MAX_TELEGRAM_CAPTION)
 
             send_err = self.send_document_with_retry(job.chat_id, path, caption, cancel)
