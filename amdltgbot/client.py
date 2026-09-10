@@ -157,7 +157,7 @@ class TelegramClient:
             "sendChatAction", {"chat_id": str(chat_id), "action": action}
         )
 
-    def send_document(self, chat_id: int, path: str, caption: str, stop_event=None) -> None:
+    def send_document(self, chat_id: int, path: str, caption: str, stop_event=None) -> int:
         """Multipart upload of a document using streaming (port of sendDocument).
 
         Files are read in 64 KiB chunks to avoid loading them entirely into
@@ -191,6 +191,8 @@ class TelegramClient:
                 payload.get("description", ""),
                 retry_after,
             )
+
+        return int((payload.get("result") or {}).get("message_id") or 0)
 
     async def _upload_document(self, boundary, chat_id, path, caption, content_length, stop_event):
         # Each transfer owns its connection. Cancellation interrupts network waits

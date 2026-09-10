@@ -20,6 +20,12 @@ MEDIA_KIND_PATTERN = re.compile(
 class InteractiveSession:
     chat_id: int
     user_id: int
+    catalog_items: list = field(default_factory=list)
+    catalog_selected: set = field(default_factory=set)
+    catalog_page: int = 0
+    catalog_offset: int = 0
+    catalog_next: bool = False
+    preview_text: str = ""
     urls: list[str] = field(default_factory=list)
     kinds: list[str] = field(default_factory=list)
     is_search: bool = False
@@ -167,7 +173,7 @@ def build_args_from_session(s: InteractiveSession) -> list[str]:
 
     if s.all_album:
         args.append("--all-album")
-    if s.single_song:
+    if s.single_song or (s.has_kind("song") and not s.has_kind("album") and not s.has_kind("playlist")):
         args.append("--song")
     if s.select_tracks:
         args.append("--select")

@@ -71,6 +71,7 @@ HELP_TEXT_TEMPLATE = (
     "/quality <link> — Listar qualidades por faixa\n"
     "/hires <link> — Verificar Hi-Res Lossless e 24-bit/192 kHz\n"
     "/status — Fila e pedido atual\n"
+    "/saude — Serviços e espaço disponível\n"
     "/cancel — Cancelar download ou envio atual\n"
     "/id — Mostrar seu ID\n\n"
     "No menu interativo você escolhe formato, limites de qualidade, "
@@ -93,6 +94,11 @@ class DownloadJob:
     journal_id: str = ""
     sent: dict[str, bool] = field(default_factory=dict)
     complete: bool = False
+    deliveries: dict = field(default_factory=dict)
+    failures: dict = field(default_factory=dict)
+    attempts: int = 0
+    recovered: int = 0
+    elapsed_seconds: float = 0
 
 
 @dataclass
@@ -536,12 +542,12 @@ def describe_audio_file(path: str) -> tuple[str, Exception | None]:
     if not streams:
         return "", None
     stream = streams[0]
-    rate = int(stream.get("sample_rate") or 0)
-    bits = int(stream.get("bits_per_raw_sample") or 0)
+    rate = int(number(stream.get("sample_rate")))
+    bits = int(number(stream.get("bits_per_raw_sample")))
     bitrate_text = stream.get("bit_rate") or probe.get("format", {}).get("bit_rate", "")
     if bitrate_text in ("", "N/A"):
         bitrate_text = "0"
-    bitrate = int(bitrate_text or 0)
+    bitrate = int(number(bitrate_text))
 
     codec = (stream.get("codec_name") or "").lower()
     quality = "Com perdas"
@@ -560,12 +566,24 @@ def describe_audio_file(path: str) -> tuple[str, Exception | None]:
     return "\n".join(parts), None
 
 
-class Bot:
+from .delivery_stats import inspect_delivery, stats_summary, classify_failure, number
+
+
+from .catalog_flow import CatalogFlow
+
+
+from .preferences import Preferences
+
+
+class Bot(CatalogFlow, Preferences):
     def __init__(self, cfg: Config, api: TelegramClient, stop_event: threading.Event) -> None:
         self.cfg = cfg
         self.api = api
         self.stop_event = stop_event
         self.queue: Queue[DownloadJob] = Queue(maxsize=cfg.queue_size)
+        self.next_upload = 0.0
+        self.upload_interval = 0.0
+        self.catalog_dispatch = None
         self.started = time.monotonic()
         self.active_lock = threading.Lock()
         self.active: ActiveDownload | None = None
@@ -776,6 +794,9 @@ class Bot:
 
         with self.sessions_lock:
             session = self.sessions.get(chat_id)
+        if session is not None and session.user_id == user_id and command == "" and session.step in ("catalog_tracks", "catalog_albums"):
+            self.selection_text(session, text)
+            return
         if (
             session is not None
             and session.user_id == user_id
@@ -800,6 +821,9 @@ class Bot:
             return
         if command == "help":
             self.api.send_message(chat_id, help_text(self.cfg.default_format))
+            return
+        if command == "saude":
+            threading.Thread(target=self.health_report, args=(chat_id,user_id), daemon=True).start()
             return
         if command == "status":
             self.api.send_message(chat_id, self.status_text())
@@ -915,6 +939,9 @@ class Bot:
             self.api.edit_message_text(s.chat_id, s.message_id, "❌ Operação cancelada.", None)
             return
         handler = {
+            "catalog_search": self.catalog_callback,
+            "catalog_tracks": self.catalog_callback,
+            "catalog_albums": self.catalog_callback,
             "audio_format": self.handle_audio_format_cb,
             "alac_max": self.handle_alac_max_cb,
             "atmos_max": self.handle_atmos_max_cb,
@@ -931,6 +958,10 @@ class Bot:
             handler(s, data)
 
     def handle_audio_format_cb(self, s, data):
+        if data == "fmt:saved":
+            if s.format:
+                self.advance_after_audio(s)
+            return
         if data == "fmt:alac":
             s.format, s.step = "alac", "alac_max"
             self.send_alac_max_menu(s)
@@ -982,6 +1013,8 @@ class Bot:
             s.all_album = True
         elif data == "aa:0":
             s.all_album = False
+            self.catalog_async(s, lambda copy: self.start_selection(copy, albums=True))
+            return
         else:
             return
         if s.all_albums_have_song_param():
@@ -1010,7 +1043,9 @@ class Bot:
 
     def handle_select_tracks_cb(self, s, data):
         if data == "sel:1":
-            s.select_tracks = True
+            s.select_tracks = False
+            self.catalog_async(s, self.start_selection)
+            return
         elif data == "sel:0":
             s.select_tracks = False
         else:
@@ -1069,31 +1104,12 @@ class Bot:
         s.step = "common_flags"
         self.send_common_flags_menu(s)
 
-    def advance_from_search_query(self, s: InteractiveSession) -> None:
+    def advance_from_search_query(self, s):
         if not s.search_query.strip():
             self.api.send_message(s.chat_id, "Informe os termos da busca.")
             return
-        s.message_id = 0  # Force new message for next menu
-
-        if s.search_type == "artist":
-            s.kinds = ["artist"]
-            s.step = "audio_format"
-            self.send_audio_format_menu(s)
-            return
-        if s.search_type == "album":
-            s.kinds = ["album"]
-            s.step = "select_tracks"
-            text = (
-                s.header() + "\n\nEscolher faixas depois de selecionar o álbum?"
-            )
-            kb = keyboard(
-                [[("Sim", "sel:1"), ("Não", "sel:0")], CANCEL_ROW]
-            )
-            s.message_id = self.api.send_message_keyboard(s.chat_id, text, kb)
-            return
-        s.kinds = ["song"]
-        s.step = "common_flags"
-        self.send_common_flags_menu(s)
+        s.message_id = 0
+        self.catalog_async(s, self.search_page)
 
     # --- interactive flow entry points -----------------------------------------------
 
@@ -1116,6 +1132,7 @@ class Bot:
         session = InteractiveSession(chat_id=chat_id, user_id=user_id, urls=urls, kinds=kinds)
 
         with self.sessions_lock:
+            self.load_preferences(session)
             self.sessions[chat_id] = session
 
         if session.has_audio_content():
@@ -1131,6 +1148,7 @@ class Bot:
     def start_search_flow(self, chat_id: int, user_id: int, argument: str) -> None:
         session = InteractiveSession(chat_id=chat_id, user_id=user_id, is_search=True)
         with self.sessions_lock:
+            self.load_preferences(session)
             self.sessions[chat_id] = session
 
         parts = argument.split()
@@ -1169,6 +1187,8 @@ class Bot:
     # --- menus -----------------------------------------------------------------------
 
     def send_or_edit_menu(self, s: InteractiveSession, text: str, kb: dict | None) -> None:
+        if not self.publish_catalog(s):
+            return
         if s.message_id == 0:
             s.message_id = self.api.send_message_keyboard(s.chat_id, text, kb)
         else:
@@ -1188,6 +1208,9 @@ class Bot:
                 CANCEL_ROW,
             ]
         )
+        if s.format:
+            text += "\nPreferência salva:\n" + s.choices_summary()
+            kb["inline_keyboard"].insert(0, [{"text":"Usar preferência salva", "callback_data":"fmt:saved"}])
         self.send_or_edit_menu(s, text, kb)
 
     def send_alac_max_menu(self, s):
@@ -1285,9 +1308,12 @@ class Bot:
         self.send_or_edit_menu(s, text, kb)
 
     def send_common_flags_menu(self, s):
+        if not s.preview_text and not getattr(s, "source", None):
+            self.catalog_async(s, lambda copy: (self.prepare_preview(copy), self.send_common_flags_menu(copy)))
+            return
         text = (
             s.header() + "\n" + s.choices_summary()
-            + "\n\n⚙️ Opções extras (clique para ativar/desativar):"
+            + self.prepare_preview(s) + "\n\n⚙️ Opções extras (clique para ativar/desativar):"
         )
         kb = keyboard(
             [
@@ -1304,6 +1330,10 @@ class Bot:
     # --- enqueue ------------------------------------------------------------------------
 
     def enqueue_from_session(self, s: InteractiveSession) -> None:
+        try:
+            self.save_preferences(s)
+        except OSError:
+            self.api.send_message(s.chat_id, "Não foi possível salvar as preferências; pedido mantido.")
         with self.sessions_lock:
             self.sessions.pop(s.chat_id, None)
 
@@ -1444,7 +1474,7 @@ class Bot:
         proc = None
         try:
             proc = subprocess.Popen(
-                [self.cfg.downloader, "--quality-info", music_url],
+                [self.cfg.downloader, "--quality-info", *(["--song"] if "/song/" in urllib.parse.urlparse(music_url).path else []), music_url],
                 cwd=self.cfg.work_dir,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1517,6 +1547,9 @@ class Bot:
         path = Path(self.cfg.download_root) / ".jobs" / (job.journal_id + ".json")
         if job.journal_id and not path.exists():
             return True
+        job.attempts += 1
+        if job.journal_id:
+            self.save_job(job)
         endpoint = os.getenv("WRAPPER_ACCOUNT_URL", "")
         if endpoint:
             try:
@@ -1562,6 +1595,7 @@ class Bot:
                 break
 
     def run_download(self, job: DownloadJob) -> None:
+        job.attempt_started = time.monotonic()
         job.complete = False
         stop = threading.Event()
         active = ActiveDownload(job=job, cancel=stop, started=time.monotonic(), stage="download")
@@ -1778,6 +1812,22 @@ class Bot:
                 if uploads.sent > uploads.previous_sent:
                     message += f"\n\nArquivos enviados antes da falha: {uploads.sent - uploads.previous_sent}."
                 self.api.send_message(job.chat_id, message)
+            job.elapsed_seconds += time.monotonic() - getattr(job, "attempt_started", time.monotonic())
+            if run_err:
+                job.failures["Pedido"] = classify_failure(Exception(output.text()))
+            elif "Pedido" in job.failures:
+                job.recovered += 1
+                del job.failures["Pedido"]
+            for path in uploads.known:
+                if not job.sent.get(path) and path not in job.failures:
+                    job.failures[path] = classify_failure(Exception("pending"))
+                    try:
+                        if self.cfg.max_upload_bytes > 0 and Path(path).stat().st_size > self.cfg.max_upload_bytes:
+                            job.failures[path] = classify_failure(Exception("too large"))
+                    except OSError:
+                        pass
+            if job.journal_id:
+                self.save_job(job)
             self.send_download_summary(job, uploads, run_err)
             job.complete = run_err is None and uploads.failed == 0 and uploads.sent == len(uploads.known)
         finally:
@@ -1857,6 +1907,7 @@ class Bot:
             total = upload_file_limit(len(uploads.known), self.cfg.max_files_per_job)
             self._set_upload_progress(downloading, uploads.processed, uploads.sent, total, name)
             caption = ""
+            metadata = inspect_delivery(path)
             description, err = describe_audio_file(path)
             if err:
                 log.warning("Could not inspect audio quality for %s: %s", name, err)
@@ -1872,6 +1923,10 @@ class Bot:
                 log.warning("Could not send %s to Telegram: %s", name, send_err)
                 uploads.failed += 1
                 uploads.consecutive_failures += 1
+                if getattr(job, "journal_id", ""):
+                    job.failures[path] = classify_failure(send_err)
+                if getattr(job, "journal_id", ""):
+                    self.save_job(job)
                 if uploads.consecutive_failures >= self.cfg.max_consecutive_upload_failures:
                     uploads.uploads_stopped = True
                     uploads.processed += 1
@@ -1889,6 +1944,11 @@ class Bot:
                 uploads.consecutive_failures = 0
                 if getattr(job, "journal_id", ""):
                     job.sent[path] = True
+                    metadata["message_id"] = getattr(self, "last_upload_message_id", 0)
+                    job.deliveries[path] = metadata
+                    if path in job.failures:
+                        job.recovered += 1
+                        del job.failures[path]
                     self.save_job(job)
                 uploads.sent += 1
                 if self.cfg.delete_after_upload:
@@ -1924,6 +1984,9 @@ class Bot:
     ) -> Exception | None:
         err: Exception | None = None
         for attempt in range(self.cfg.upload_retries + 1):
+            delay = self.next_upload - time.monotonic()
+            if delay > 0 and cancel.wait(delay):
+                return InterruptedError("cancelled")
             # Verify the file still exists before each attempt; if it has
             # been removed (e.g. by another process or a race condition)
             # there is no point retrying.
@@ -1935,10 +1998,16 @@ class Bot:
                 # Exercise the complete Telegram API path before copying a
                 # potentially large document into the local API temp area.
                 self.api.send_chat_action(chat_id, "upload_document")
-                self.api.send_document(chat_id, path, caption, stop_event=cancel)
+                self.last_upload_message_id = self.api.send_document(chat_id, path, caption, stop_event=cancel) or 0
+                self.upload_interval *= 0.8
+                self.next_upload = time.monotonic() + self.upload_interval
                 return None
             except Exception as exc:  # noqa: BLE001
                 err = exc
+            if isinstance(err, TelegramAPIError) and (err.retry_after > 0 or err.code == 429):
+                delay, _ = self.upload_retry_delay(err, attempt + 1)
+                self.next_upload = time.monotonic() + delay
+                self.upload_interval = min(delay / 4, 30)
             if attempt == self.cfg.upload_retries:
                 break
             delay, retryable = self.upload_retry_delay(err, attempt + 1)
@@ -1997,6 +2066,7 @@ class Bot:
             summary += "\nNenhum arquivo de mídia concluído foi encontrado para este pedido."
         if job.journal_id and (run_err or uploads.failed or uploads.sent != total):
             summary += "\n🔄 Pedido incompleto salvo. Nova tentativa automática em aproximadamente 1 minuto, conforme a fila; envios confirmados não serão repetidos. /cancel cancela os seus pedidos pendentes."
+        summary += stats_summary(job)
         self.api.send_message(job.chat_id, summary)
 
     def session_cleanup(self) -> None:

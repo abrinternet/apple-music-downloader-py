@@ -25,8 +25,11 @@ class API:
 
 
 @pytest.fixture
-def bot(tmp_path):
-    return Bot(Config(download_root=str(tmp_path), allowed_users="1", allowed_users_file=str(tmp_path / "allow")), API(), threading.Event())
+def bot(tmp_path, monkeypatch):
+    monkeypatch.setattr("amdltgbot.catalog.Catalog.get", lambda *a: {"data":[{"id":"1", "type":"songs", "attributes":{"name":"Test", "url":"https://music.apple.com/br/song/x/1", "durationInMillis":180000}}]})
+    b = Bot(Config(download_root=str(tmp_path), allowed_users="1", allowed_users_file=str(tmp_path / "allow")), API(), threading.Event())
+    b.catalog_dispatch = lambda fn: fn()
+    return b
 
 
 @pytest.mark.parametrize("command", ["id", "start", "menu", "help", "status", "cancel", "buscar", "download", "alac", "atmos", "aac", "quality", "qualidade", "hires", "unknown"])
@@ -55,7 +58,7 @@ CASES += [("atmos_max", f"atm:{x}", "atmos_max", x) for x in (2448, 2768)]
 CASES += [("aac_type", "act:" + x, "aac_type", x) for x in ("aac-lc", "aac-binaural", "aac-downmix")]
 CASES += [("mv_audio", "mva:" + x, "mv_audio_type", x) for x in ("atmos", "ac3", "aac")]
 CASES += [("mv_max", f"mvr:{x}", "mv_max", x) for x in (720, 1080, 1440, 2160)]
-CASES += [(step, f"{prefix}:{x}", field, bool(x)) for step, prefix, field in (("all_album", "aa", "all_album"), ("song_mode", "sng", "single_song"), ("select_tracks", "sel", "select_tracks")) for x in (0, 1)]
+CASES += [(step, f"{prefix}:{x}", field, (bool(x) if field != "select_tracks" else False)) for step, prefix, field in (("all_album", "aa", "all_album"), ("song_mode", "sng", "single_song"), ("select_tracks", "sel", "select_tracks")) for x in (0, 1)]
 CASES += [("common_flags", "tgl:" + key, field, True) for key, field in (("debug", "debug"), ("json", "print_json"), ("m3u8", "save_m3u8"))]
 CASES += [("search_type", "src:" + x, "search_type", x) for x in ("album", "song", "artist")]
 

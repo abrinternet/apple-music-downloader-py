@@ -621,8 +621,13 @@ def rip_album(
     meta = album.resp
 
     if state_obj.debug_mode:
+        tracks = meta.data[0].relationships.tracks.data
+        if state_obj.dl_song:
+            tracks = [track for track in tracks if url_arg_i and track.id == url_arg_i]
+            if not tracks:
+                raise ValueError(f"song {url_arg_i} was not found in album {album_id}")
         _debug_track_report(
-            state_obj, storefront, meta.data[0].relationships.tracks.data, album.language, token
+            state_obj, storefront, tracks, album.language, token
         )
         return
 
