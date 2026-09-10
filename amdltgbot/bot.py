@@ -1822,7 +1822,7 @@ class Bot:
                 continue
             uploads.handled[path] = True
             uploads.attempted += 1
-            if not Path(path).is_file():
+            if not Path(path).is_file() or stat.st_size == 0:
                 uploads.failed += 1
                 uploads.processed += 1
                 self._set_upload_progress(downloading, uploads.processed, uploads.sent,

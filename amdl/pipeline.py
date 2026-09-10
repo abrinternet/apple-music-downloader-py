@@ -31,7 +31,8 @@ def _contains(values: list[str] | None, needle: str) -> bool:
 
 def file_exists(path: str) -> bool:
     p = Path(path)
-    return p.exists() and p.is_file()
+    # Interrupted downloads can leave empty outputs; these must be rebuilt.
+    return p.is_file() and p.stat().st_size > 0
 
 
 def was_delivered(path: str) -> bool:
