@@ -17,7 +17,7 @@ import threading
 import time
 import unicodedata
 import urllib.parse
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from queue import Empty, Queue
 
@@ -88,6 +88,9 @@ class DownloadJob:
     urls: list[str]
     args: list[str] = field(default_factory=list)
     queued_at: float = field(default_factory=time.monotonic)
+    journal_id: str = ""
+    sent: dict[str, bool] = field(default_factory=dict)
+    complete: bool = False
 
 
 @dataclass
@@ -100,6 +103,7 @@ class ActiveDownload:
     uploaded: int = 0
     total: int = 0
     current: str = ""
+    progress_at: float = field(default_factory=time.monotonic)
 
 
 class TailBuffer:
@@ -615,6 +619,8 @@ class Bot:
                 return
             active.stage = "download_upload" if downloading else "upload"
             active.processed = processed
+            if active.uploaded != uploaded or active.total != total:
+                active.progress_at = time.monotonic()
             active.uploaded = uploaded
             active.total = total
             active.current = current
@@ -625,8 +631,16 @@ class Bot:
 
     def cancel_active(self, user_id: int) -> bool:
         with self.active_lock:
+            cancelled = False
+            for path in (Path(self.cfg.download_root) / ".jobs").glob("*.json"):
+                try:
+                    if json.loads(path.read_text())["user_id"] == user_id:
+                        path.unlink(missing_ok=True)
+                        cancelled = True
+                except (OSError, ValueError, KeyError):
+                    log.exception("Cannot cancel saved request %s", path)
             if self.active is None or self.active.job.user_id != user_id:
-                return False
+                return cancelled
             self.active.cancel.set()
             return True
 
@@ -662,6 +676,8 @@ class Bot:
         retry_delay = 1.0
         while not self.stop_event.is_set():
             try:
+                Path(self.cfg.download_root).mkdir(parents=True, exist_ok=True)
+                (Path(self.cfg.download_root) / ".bot-heartbeat").write_text(str(time.time()))
                 updates = self._get_updates_with_stop(offset)
             except TelegramAPIError as exc:
                 if exc.code in (401, 404):
@@ -1303,9 +1319,12 @@ class Bot:
         self._enqueue(job, chat_id, False)
 
     def _enqueue(self, job: DownloadJob, chat_id: int, is_search: bool) -> None:
+        job.journal_id = f"{chat_id}-{time.time_ns()}"
+        self.save_job(job)
         try:
             self.queue.put_nowait(job)
         except Exception:
+            (Path(self.cfg.download_root) / ".jobs" / (job.journal_id + ".json")).unlink(missing_ok=True)
             self.api.send_message(chat_id, "⚠️ A fila está cheia. Tente novamente mais tarde.")
             return
         position = self.queue.qsize()
@@ -1474,24 +1493,60 @@ class Bot:
 
     # --- worker -------------------------------------------------------------------------------
 
+    def save_job(self, job: DownloadJob) -> None:
+        directory = Path(self.cfg.download_root) / ".jobs"
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = directory / (job.journal_id + ".json")
+        fd, name = tempfile.mkstemp(dir=directory, prefix="journal-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(asdict(job), stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, target)
+        finally:
+            Path(name).unlink(missing_ok=True)
+
+    def recover_job(self, job: DownloadJob) -> bool:
+        path = Path(self.cfg.download_root) / ".jobs" / (job.journal_id + ".json")
+        if job.journal_id and not path.exists():
+            return True
+        try:
+            self.run_download(job)
+            if job.complete:
+                path.unlink(missing_ok=True)
+                return True
+        except Exception:
+            log.exception("Request remains saved for recovery")
+        return not job.journal_id
+
     def download_worker(self) -> None:
+        pending = []
+        for path in sorted((Path(self.cfg.download_root) / ".jobs").glob("*.json")):
+            try:
+                job = DownloadJob(**json.loads(path.read_text(encoding="utf-8")))
+            except Exception:
+                log.exception("Cannot restore request %s", path)
+                continue
+            pending.append((0, job))
         while not self.stop_event.is_set():
             try:
-                job = self.queue.get(timeout=0.5)
+                job = self.queue.get(timeout=0.5 if not pending else 0.1)
             except Empty:
-                continue
-            try:
-                self.run_download(job)
-            except Exception:
-                log.exception("Download job failed unexpectedly; queue remains available")
-                try:
-                    self.api.send_message(job.chat_id, "❌ O pedido falhou. A fila continua disponível; tente novamente.")
-                except Exception:
-                    log.warning("Could not notify user about failed job")
-            finally:
+                pass
+            else:
+                pending.append((0, job))
                 self.queue.task_done()
+            for index, (due, job) in enumerate(pending):
+                if time.monotonic() < due:
+                    continue
+                pending.pop(index)
+                if not self.recover_job(job):
+                    pending.append((time.monotonic() + 60, job))
+                break
 
     def run_download(self, job: DownloadJob) -> None:
+        job.complete = False
         stop = threading.Event()
         active = ActiveDownload(job=job, cancel=stop, started=time.monotonic(), stage="download")
         with self.active_lock:
@@ -1501,7 +1556,7 @@ class Bot:
         def watchdog():
             deadline = active.started + self.cfg.job_timeout
             while not watchdog_done.wait(0.1):
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= deadline or time.monotonic() - active.progress_at >= self.cfg.idle_timeout:
                     timed_out.set()
                     stop.set()
                     return
@@ -1516,7 +1571,8 @@ class Bot:
             watchdog_done.set()
             watcher.join(timeout=1)
             if timed_out.is_set():
-                log.error("Job exceeded timeout (%ss)", self.cfg.job_timeout)
+                job.complete = False
+                log.error("Job exceeded total or idle timeout; saved for retry")
             with self.active_lock:
                 if self.active is active:
                     self.active = None
@@ -1531,6 +1587,8 @@ class Bot:
             TEMP=temp_dir,
             APPLE_MUSIC_OUTPUT_MANIFEST=manifest_path,
         )
+        if job.journal_id:
+            env["APPLE_MUSIC_DELIVERY_JOURNAL"] = str(Path(self.cfg.download_root) / ".jobs" / (job.journal_id + ".json"))
         kwargs: dict = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -1627,6 +1685,12 @@ class Bot:
             hb_thread.start()
 
             uploads = UploadState()
+            for path, sent in job.sent.items():
+                if sent:
+                    uploads.known[path] = True
+                    uploads.handled[path] = True
+                    uploads.sent += 1
+                    uploads.attempted += 1
             downloads_done = threading.Event()
 
             def wait_process() -> None:
@@ -1663,6 +1727,7 @@ class Bot:
             pump_thread.join(timeout=5)
 
             if cancelled or stop.is_set() or self.stop_event.is_set():
+                job.complete = stop.is_set() and not self.stop_event.is_set()
                 message = "🛑 Download cancelado."
                 if uploads.sent > 0:
                     message += f"\nArquivos enviados antes do cancelamento: {uploads.sent}."
@@ -1681,6 +1746,7 @@ class Bot:
             self.upload_available_files(job, uploads, files, before, False, stop)
 
             if stop.is_set() or self.stop_event.is_set():
+                job.complete = stop.is_set() and not self.stop_event.is_set()
                 self.api.send_message(job.chat_id, "🛑 Envio cancelado. Arquivos sem confirmação foram preservados.")
                 return
 
@@ -1696,6 +1762,7 @@ class Bot:
                     message += f"\n\nArquivos enviados antes da falha: {uploads.sent}."
                 self.api.send_message(job.chat_id, message)
             self.send_download_summary(job, uploads, run_err)
+            job.complete = run_err is None and uploads.failed == 0 and uploads.sent == len(uploads.known)
         finally:
             heartbeat_stop.set()
             if process is not None:
@@ -1711,11 +1778,20 @@ class Bot:
         downloading: bool,
         cancel: threading.Event,
     ) -> None:
+        if uploads.uploads_stopped:
+            uploads.known.update(dict.fromkeys(files, True))
+            return
         for path in files:
             if cancel.is_set() or self.stop_event.is_set():
                 return
             uploads.known[path] = True
             if uploads.handled.get(path):
+                continue
+            if getattr(job, "journal_id", "") and job.sent.get(path):
+                uploads.handled[path] = True
+                uploads.sent += 1
+                uploads.attempted += 1
+                uploads.processed += 1
                 continue
             if self.cfg.max_files_per_job > 0 and uploads.attempted >= self.cfg.max_files_per_job:
                 continue
@@ -1794,6 +1870,9 @@ class Bot:
                     return
             else:
                 uploads.consecutive_failures = 0
+                if getattr(job, "journal_id", ""):
+                    job.sent[path] = True
+                    self.save_job(job)
                 uploads.sent += 1
                 if self.cfg.delete_after_upload:
                     remove_err = remove_uploaded_media(self.cfg.download_root, path)
@@ -1897,6 +1976,8 @@ class Bot:
             summary += "\nOs arquivos permanecem salvos na pasta downloads do computador."
         if total == 0:
             summary += "\nNenhum arquivo de mídia concluído foi encontrado para este pedido."
+        if job.journal_id and (run_err or uploads.failed or uploads.sent != total):
+            summary += "\n🔄 Pedido incompleto salvo. Nova tentativa automática em aproximadamente 1 minuto, conforme a fila; envios confirmados não serão repetidos. /cancel cancela os seus pedidos pendentes."
         self.api.send_message(job.chat_id, summary)
 
     def session_cleanup(self) -> None:

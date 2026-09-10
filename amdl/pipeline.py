@@ -7,6 +7,7 @@ and the manifest-resolution helpers (main.go lines 948-1998 and 2437-2612).
 from __future__ import annotations
 
 import os
+import json
 import sys
 import shutil
 import subprocess
@@ -31,6 +32,17 @@ def _contains(values: list[str] | None, needle: str) -> bool:
 def file_exists(path: str) -> bool:
     p = Path(path)
     return p.exists() and p.is_file()
+
+
+def was_delivered(path: str) -> bool:
+    journal = os.getenv("APPLE_MUSIC_DELIVERY_JOURNAL", "")
+    if not journal:
+        return False
+    try:
+        record = json.loads(Path(journal).read_text())
+        return bool(record.get("sent", record.get("Sent", {})).get(str(Path(path).absolute())))
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def write_lyrics(folder: str, filename: str, lrc: str) -> None:
@@ -427,6 +439,11 @@ def rip_track(state_obj: State, track: Track, token: str, media_user_token: str)
         converted_path = str(Path(track_path).with_suffix("." + cfg.convert_format.lower()))
         consider_converted = True
 
+    if was_delivered(track_path) or (consider_converted and was_delivered(converted_path)):
+        print("Track already delivered to Telegram.")
+        state_obj.counter.success += 1
+        state_obj.ok_dict.setdefault(track.pre_id, []).append(track.task_num)
+        return
     if file_exists(track_path):
         print("Track already exists locally.")
         state_obj.counter.success += 1

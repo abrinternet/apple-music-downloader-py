@@ -116,6 +116,8 @@ def load_config(path: str | os.PathLike[str] = "config.yaml") -> ConfigSet:
     # Prefer a Docker/Kubernetes-style secret file over putting the
     # media-user-token in config.yaml. An environment variable is kept as a
     # convenient fallback for non-container use.
+    cfg.decrypt_m3u8_port = os.getenv("WRAPPER_DECRYPT_ADDRESS", "").strip() or cfg.decrypt_m3u8_port
+    cfg.get_m3u8_port = os.getenv("WRAPPER_M3U8_ADDRESS", "").strip() or cfg.get_m3u8_port
     token_file = os.getenv("MEDIA_USER_TOKEN_FILE", "").strip()
     if token_file:
         token = Path(token_file).read_text(encoding="utf-8").strip()

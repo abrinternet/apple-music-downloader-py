@@ -107,3 +107,23 @@ No `deploy/telegram-server/update_bots.sh` do repositório Go, use
 - `amdltgbot/` — bot do Telegram (`client.py`, `bot.py`, `interactive.py`)
 - `scripts/extract_device_consts.py` — regenera `amdl/runv3/device_consts.py`
   a partir do `consts.go` do repositório Go
+# Recuperacao do bot
+
+Pedidos aceitos e confirmacoes de envio sao persistidos em `/downloads/.jobs`.
+Reiniciar o container preserva a fila, desde que o volume seja mantido. Pedidos
+incompletos voltam a ser tentados apos 60 segundos, permitindo que outros pedidos
+avancem. `/cancel` cancela tambem pedidos do usuario aguardando recuperacao.
+
+`TELEGRAM_IDLE_TIMEOUT=600` limita o tempo sem novos arquivos ou envios;
+`TELEGRAM_JOB_TIMEOUT=21600` limita cada tentativa. Arquivos sao excluidos somente
+apos confirmar e persistir o envio. O downloader consulta o registro do pedido
+para pular arquivos ja entregues, sem precisar conserva-los no disco.
+
+Em containers separados, configure `WRAPPER_ACCOUNT_URL`,
+`WRAPPER_DECRYPT_ADDRESS` e `WRAPPER_M3U8_ADDRESS` com o DNS do wrapper.
+O monitor externo e o Compose de producao estao no repositorio Go, em
+`deploy/telegram-server/update_bots.sh`. Eles atendem aos dois motores.
+
+Credenciais revogadas e conteudo indisponivel podem impedir a conclusao ate que
+a causa seja resolvida. Uma resposta perdida depois de o Telegram aceitar um
+arquivo pode causar duplicacao; `sendDocument` nao fornece idempotencia.

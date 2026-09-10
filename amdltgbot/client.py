@@ -55,7 +55,7 @@ class TelegramClient:
         self.token = token
         self.client = httpx.Client(timeout=45.0, trust_env=True)
         self.upload_client = httpx.Client(
-            timeout=httpx.Timeout(connect=15.0, read=900.0, write=60.0, pool=15.0),
+            timeout=httpx.Timeout(connect=15.0, read=180.0, write=60.0, pool=15.0),
             limits=httpx.Limits(
                 max_connections=2,
                 max_keepalive_connections=1,
