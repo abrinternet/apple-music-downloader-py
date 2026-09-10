@@ -252,6 +252,10 @@ def parse_quality_output(output: str) -> list[TrackQuality]:
     tracks: list[TrackQuality] = []
     current: TrackQuality | None = None
     for line in text.splitlines():
+        if re.match(r"^Track \d+ of \d+:\s*(?:songs|music-videos)?\s*$", line.strip()):
+            current = TrackQuality(name="")
+            tracks.append(current)
+            continue
         header = TRACK_HEADER_RE.match(line.strip())
         if header:
             current = TrackQuality(name=header.group(4).strip())

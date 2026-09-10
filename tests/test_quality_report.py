@@ -46,6 +46,13 @@ def test_parse_extrai_campos_por_faixa():
     assert second.fields["Dolby Atmos"].startswith("E-AC-3")
 
 
+def test_parse_separate_track_name():
+    tracks = parse_quality_output("Track 1 of 1: songs\n1. Stairway to Heaven\nHi-Res Lossless : ALAC | 2 Channel | 24-bit/96.0 kHz\n")
+    assert len(tracks) == 1
+    assert tracks[0].name == "Stairway to Heaven"
+    assert tracks[0].fields["Hi-Res Lossless"]
+
+
 def test_render_quality_compacto_e_com_contadores():
     report = render_quality_report(parse_quality_output(SAMPLE_OUTPUT))
     assert "2 faixa(s)" in report
