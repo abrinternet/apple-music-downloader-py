@@ -54,3 +54,26 @@ def test_cancel_removes_saved_request(tmp_path):
     bot.save_job(job)
     assert bot.cancel_active(123)
     assert bot.recover_job(job)  # no API/downloader call for a cancelled request
+
+
+def test_unavailable_wrapper_preserves_request(tmp_path, monkeypatch):
+    monkeypatch.setenv('WRAPPER_ACCOUNT_URL', 'http://127.0.0.1:1/')
+    bot = Bot(Config(download_root=str(tmp_path)), None, threading.Event())
+    job = DownloadJob(1, 123, 'alac', [], journal_id='pending')
+    bot.save_job(job)
+    assert not bot.recover_job(job)
+    assert (tmp_path / '.jobs/pending.json').exists()
+
+
+def test_retry_summary_does_not_claim_new_deliveries(tmp_path):
+    messages = []
+    class API:
+        def send_message(self, chat, text): messages.append(text)
+    bot = Bot(Config(download_root=str(tmp_path), delete_after_upload=True), API(), threading.Event())
+    state = UploadState()
+    state.known = {'old.m4a': True}
+    state.sent = state.previous_sent = 1
+    bot.send_download_summary(DownloadJob(1, 1, 'alac', [], journal_id='saved'), state, RuntimeError('offline'))
+    assert 'Novos envios nesta tentativa: 0' in messages[0]
+    assert 'Todos os' not in messages[0]
+    assert 'Preservados no servidor' not in messages[0]

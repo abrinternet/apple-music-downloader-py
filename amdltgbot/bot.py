@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
+from urllib.parse import urlparse
 import re
 import shutil
 import subprocess
@@ -1511,6 +1513,16 @@ class Bot:
         path = Path(self.cfg.download_root) / ".jobs" / (job.journal_id + ".json")
         if job.journal_id and not path.exists():
             return True
+        endpoint = os.getenv("WRAPPER_ACCOUNT_URL", "")
+        if endpoint:
+            try:
+                parsed = urlparse(endpoint)
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                with socket.create_connection((parsed.hostname, port), timeout=3):
+                    pass
+            except (OSError, ValueError):
+                log.warning("Wrapper unavailable; request remains saved")
+                return False
         try:
             self.run_download(job)
             if job.complete:
@@ -1690,6 +1702,7 @@ class Bot:
                     uploads.known[path] = True
                     uploads.handled[path] = True
                     uploads.sent += 1
+                    uploads.previous_sent += 1
                     uploads.attempted += 1
             downloads_done = threading.Event()
 
@@ -1729,8 +1742,8 @@ class Bot:
             if cancelled or stop.is_set() or self.stop_event.is_set():
                 job.complete = stop.is_set() and not self.stop_event.is_set()
                 message = "🛑 Download cancelado."
-                if uploads.sent > 0:
-                    message += f"\nArquivos enviados antes do cancelamento: {uploads.sent}."
+                if uploads.sent > uploads.previous_sent:
+                    message += f"\nArquivos enviados antes do cancelamento: {uploads.sent - uploads.previous_sent}."
                     if self.cfg.delete_after_upload:
                         message += f" Removidos do servidor: {uploads.deleted}."
                 self.api.send_message(job.chat_id, message)
@@ -1758,8 +1771,8 @@ class Bot:
                 message = f"❌ O download falhou: {run_err}"
                 if details:
                     message += "\n\nÚltimas mensagens:\n" + details
-                if uploads.sent > 0:
-                    message += f"\n\nArquivos enviados antes da falha: {uploads.sent}."
+                if uploads.sent > uploads.previous_sent:
+                    message += f"\n\nArquivos enviados antes da falha: {uploads.sent - uploads.previous_sent}."
                 self.api.send_message(job.chat_id, message)
             self.send_download_summary(job, uploads, run_err)
             job.complete = run_err is None and uploads.failed == 0 and uploads.sent == len(uploads.known)
@@ -1946,7 +1959,9 @@ class Bot:
             summary += f"\nArquivos de mídia detectados: {total}."
         if uploads.attempted > 0:
             summary += f"\nNovos/alterados: {uploads.changed}. Já salvos: {uploads.existing}."
-        if total > 0 and uploads.sent == total:
+        if uploads.previous_sent:
+            summary += f"\nConfirmados em tentativas anteriores: {uploads.previous_sent}. Novos envios nesta tentativa: {uploads.sent - uploads.previous_sent}."
+        if total > 0 and uploads.sent == total and run_err is None and uploads.failed == 0:
             summary += f"\n✅ Todos os {total} arquivos foram enviados no Telegram."
         else:
             summary += f"\nEnviados no Telegram: {uploads.sent}."
@@ -1966,7 +1981,7 @@ class Bot:
             summary += f"\nExcluídos do servidor após confirmação: {uploads.deleted}."
             if uploads.delete_failed > 0:
                 summary += f"\nFalhas de exclusão: {uploads.delete_failed}."
-            remaining = total - uploads.deleted
+            remaining = total - uploads.sent
             if remaining > 0:
                 summary += (
                     "\nPreservados no servidor por não terem envio e exclusão confirmados: "
@@ -1995,6 +2010,7 @@ class Bot:
 
 class UploadState:
     def __init__(self) -> None:
+        self.previous_sent = 0
         self.known: dict[str, bool] = {}
         self.handled: dict[str, bool] = {}
         self.attempted = 0
