@@ -324,14 +324,11 @@ def render_quality_report(tracks: list[TrackQuality]) -> str:
         f"✨ Hi-Res: {hires} · 🏆 192 kHz: {k192} · 🎬 Atmos: {atmos}",
         "",
     ]
-    shown = tracks if len(tracks) <= 12 else tracks[:12]
-    for index, track in enumerate(shown, start=1):
+    for index, track in enumerate(tracks, start=1):
         tags = _quality_tags(track)
         lines.append(f"{index:02d}. {track.name}")
         if tags:
             lines.append(f"     {tags}")
-    if len(tracks) > len(shown):
-        lines.append(f"… e mais {len(tracks) - len(shown)} faixa(s)")
     return "\n".join(lines)
 
 
@@ -357,8 +354,7 @@ def render_hires_report(tracks: list[TrackQuality]) -> str:
             lines.append(f"{emoji} {title}: nenhuma faixa")
             return
         lines.append(f"{emoji} {title}:")
-        limit = 15
-        for index, track in enumerate(items[:limit], start=1):
+        for index, track in enumerate(items, start=1):
             detail = ""
             for key in (
                 "Hi-Res Lossless",
@@ -375,8 +371,6 @@ def render_hires_report(tracks: list[TrackQuality]) -> str:
                     if key in title:
                         break
             lines.append(f"  {index:02d}. {track.name}" + (f" — {detail}" if detail else ""))
-        if len(items) > limit:
-            lines.append(f"  … e mais {len(items) - limit} faixa(s)")
 
     section("Hi-Res Lossless", hires, "✨")
     section("24-bit/192 kHz", k192, "🏆")

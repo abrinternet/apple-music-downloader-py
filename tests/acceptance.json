@@ -60,7 +60,7 @@
     },
     {
       "input": "404 not found",
-      "category": "Catálogo"
+      "category": "Cat"
     },
     {
       "input": "413 too large",
@@ -68,11 +68,11 @@
     },
     {
       "input": "429 retry after 8",
-      "category": "Limite temporário"
+      "category": "Limite"
     },
     {
       "input": "connection refused",
-      "category": "Falha transitória"
+      "category": "Falha"
     }
   ]
 }
