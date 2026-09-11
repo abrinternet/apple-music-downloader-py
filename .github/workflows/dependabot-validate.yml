@@ -28,7 +28,6 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      merge: ${{ steps.pr.outputs.merge }}
       files: ${{ steps.pr.outputs.files }}
       android: ${{ steps.pr.outputs.android }}
       node: ${{ steps.pr.outputs.node }}
@@ -49,13 +48,9 @@ jobs:
               || p.head.repo?.full_name!==context.payload.repository.full_name
               || p.base.ref!==context.payload.repository.default_branch) throw new Error('Untrusted PR');
           const {data:base}=await github.rest.git.getRef({...context.repo,ref:'heads/'+p.base.ref});
-          if (p.head.sha!==process.env.EXPECTED_HEAD || base.object.sha!==process.env.EXPECTED_BASE
-              || !p.mergeable || !p.merge_commit_sha) throw new Error('PR changed or conflicts; requeue validation');
-          const {data:merge}=await github.rest.git.getCommit({...context.repo,commit_sha:p.merge_commit_sha});
-          if (!merge.parents.some(x=>x.sha===base.object.sha) || !merge.parents.some(x=>x.sha===p.head.sha))
-            throw new Error('Merge candidate is stale; requeue validation');
+          if (p.head.sha!==process.env.EXPECTED_HEAD || base.object.sha!==process.env.EXPECTED_BASE)
+            throw new Error('PR changed; requeue validation');
           const files=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:number,per_page:100});
-          core.setOutput('merge',p.merge_commit_sha);
           core.setOutput('files',JSON.stringify(files.map(f=>f.filename)));
           core.setOutput('android',String(files.some(f=>f.filename.startsWith('apps/android/'))));
           core.setOutput('node',String(files.some(f=>/(package.json|lock.yaml|package-lock.json)$/.test(f.filename))));
@@ -76,8 +71,18 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       with:
-        ref: ${{ needs.prepare.outputs.merge }}
+        ref: ${{ inputs.base }}
+        fetch-depth: 0
         persist-credentials: false
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: ${{ inputs.head }}
+        fetch-depth: 0
+        persist-credentials: false
+    - name: Combine exact PR and base commits
+      env:
+        EXPECTED_BASE: ${{ inputs.base }}
+      run: git -c user.name=dependency-validation -c user.email=validation@localhost merge --no-commit --no-ff "$EXPECTED_BASE"
     - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
       with:
         python-version: '3.14'
