@@ -8,7 +8,7 @@ from __future__ import annotations
 import urllib.parse
 
 from . import urls
-from .state import State
+from .state import State, sanitize_name
 
 
 def _expand_artist_urls(state_obj: State, token: str, args_list: list[str]) -> list[str]:
@@ -19,7 +19,6 @@ def _expand_artist_urls(state_obj: State, token: str, args_list: list[str]) -> l
             expanded.append(url_raw)
             continue
         from .artist import check_artist, get_url_artist_name
-        from .state import sanitize_name
 
         try:
             _, url_artist_id = urls.check_url_artist(url_raw)

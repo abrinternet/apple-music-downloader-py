@@ -3,17 +3,20 @@
 from amdl import dispatch
 from amdl.config import ConfigSet
 from amdl.state import State
+from pathlib import Path
 
 
 def test_mv_dispatch_passa_media_user_token(monkeypatch):
     st = State()
     st.config.media_user_token = "x" * 120
+    st.config.artist_folder_format = "Artist/Name"
+    st.config.mv_save_folder = "MusicVideos"
 
     capturado = {}
 
     def fake_mv_downloader(state_obj, album_id, save_dir, token, storefront, mut, track):
         capturado.update(
-            album_id=album_id, storefront=storefront, mut=mut
+            album_id=album_id, storefront=storefront, mut=mut, save_dir=save_dir
         )
 
     import amdl.pipeline as pipeline
@@ -31,6 +34,8 @@ def test_mv_dispatch_passa_media_user_token(monkeypatch):
     assert capturado["album_id"] == "1495409676"
     assert capturado["storefront"] == "br"
     assert capturado["mut"] == "x" * 120
+    assert Path(capturado["save_dir"]).parent == Path("MusicVideos")
+    assert "/" not in Path(capturado["save_dir"]).name
 
 
 _ = ConfigSet
