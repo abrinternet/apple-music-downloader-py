@@ -17,3 +17,15 @@ config.yaml
 *.log
 compose.yaml
 README-CN.md
+
+# Keep credentials and local state out of every build context, including subdirectories.
+**/.git
+**/.env
+**/.env.*
+**/*.env
+**/secrets
+**/credentials
+**/*.pem
+**/*.key
+**/.venv
+**/__pycache__
