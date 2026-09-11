@@ -48,8 +48,12 @@ jobs:
           if (p.state!=='open' || p.draft || p.user.id!==49699333 || p.user.login!=='dependabot[bot]'
               || p.head.repo?.full_name!==context.payload.repository.full_name
               || p.base.ref!==context.payload.repository.default_branch) throw new Error('Untrusted PR');
-          if (p.head.sha!==process.env.EXPECTED_HEAD || p.base.sha!==process.env.EXPECTED_BASE
+          const {data:base}=await github.rest.git.getRef({...context.repo,ref:'heads/'+p.base.ref});
+          if (p.head.sha!==process.env.EXPECTED_HEAD || base.object.sha!==process.env.EXPECTED_BASE
               || !p.mergeable || !p.merge_commit_sha) throw new Error('PR changed or conflicts; requeue validation');
+          const {data:merge}=await github.rest.git.getCommit({...context.repo,commit_sha:p.merge_commit_sha});
+          if (!merge.parents.some(x=>x.sha===base.object.sha) || !merge.parents.some(x=>x.sha===p.head.sha))
+            throw new Error('Merge candidate is stale; requeue validation');
           const files=await github.paginate(github.rest.pulls.listFiles,{...context.repo,pull_number:number,per_page:100});
           core.setOutput('merge',p.merge_commit_sha);
           core.setOutput('files',JSON.stringify(files.map(f=>f.filename)));
