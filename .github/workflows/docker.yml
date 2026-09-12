@@ -82,6 +82,8 @@ jobs:
         \ \"linux\" and .platform.architecture == $arch)] | if length == 1 then .[0].digest else error(\"Invalid platform\
         \ index\") end' <<<\"$index\")\n  docker pull --platform \"$platform\" \"${IMAGE}@${child}\"\n  docker run --rm --platform\
         \ \"$platform\" --entrypoint /bin/sh \"${IMAGE}@${child}\" -ec \"$SMOKE\"\ndone\n"
+    - name: Use direct registry access for mutable release tags
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
     - name: Promote current verified revision
       env:
         GH_TOKEN: ${{ github.token }}
