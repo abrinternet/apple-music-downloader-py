@@ -4,6 +4,8 @@ name: Docker Hub release
     branches:
     - main
   workflow_dispatch: null
+  schedule:
+  - cron: 35 3 * * 0
 permissions:
   contents: read
 concurrency:
@@ -65,13 +67,17 @@ jobs:
         cache-to: type=gha,mode=max,scope=${{ matrix.image }}
         provenance: mode=max
         sbom: true
+        no-cache: ${{ github.event_name == 'schedule' }}
     - name: Smoke-test both published platforms
       env:
         IMAGE: augustobr/${{ matrix.image }}
         DIGEST: ${{ steps.build.outputs.digest }}
         SMOKE: ${{ matrix.smoke }}
-      run: "set -euo pipefail\nfor platform in linux/amd64 linux/arm64; do\n  docker pull --platform \"$platform\" \"${IMAGE}@${DIGEST}\"\
-        \n  docker run --rm --platform \"$platform\" --entrypoint /bin/sh \"${IMAGE}@${DIGEST}\" -ec \"$SMOKE\"\ndone\n"
+      run: "set -euo pipefail\nindex=$(docker buildx imagetools inspect \"${IMAGE}@${DIGEST}\" --raw)\nfor arch in amd64 arm64;\
+        \ do\n  platform=\"linux/${arch}\"\n  child=$(jq -er --arg arch \"$arch\" '[.manifests[] | select(.platform.os ==\
+        \ \"linux\" and .platform.architecture == $arch)] | if length == 1 then .[0].digest else error(\"Invalid platform\
+        \ index\") end' <<<\"$index\")\n  docker pull --platform \"$platform\" \"${IMAGE}@${child}\"\n  docker run --rm --platform\
+        \ \"$platform\" --entrypoint /bin/sh \"${IMAGE}@${child}\" -ec \"$SMOKE\"\ndone\n"
     - name: Promote current verified revision
       env:
         GH_TOKEN: ${{ github.token }}
