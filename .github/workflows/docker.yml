@@ -1,0 +1,87 @@
+name: Docker Hub release
+'on':
+  push:
+    branches:
+    - main
+  workflow_dispatch: null
+permissions:
+  contents: read
+concurrency:
+  group: docker-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - name: Run acceptance tests
+      run: 'python -m pip install -e ''.[dev]''
+
+        python -m pytest -q'
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - image: apple-music-downloader-py
+          target: downloader
+          smoke: apple-music-dl --help; python -m pip check; MP4Box -version; ffmpeg -version
+        - image: apple-music-telegram-bot-py
+          target: telegram-bot
+          smoke: python -c "import amdltgbot, amdl"; python -m pip check; MP4Box -version; ffmpeg -version
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a
+    - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+    - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Publish candidate
+      id: build
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+      with:
+        context: .
+        target: ${{ matrix.target }}
+        platforms: linux/amd64,linux/arm64
+        push: true
+        pull: true
+        tags: augustobr/${{ matrix.image }}:sha-${{ github.sha }}
+        labels: 'org.opencontainers.image.revision=${{ github.sha }}
+
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}'
+        cache-from: type=gha,scope=${{ matrix.image }}
+        cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+        provenance: mode=max
+        sbom: true
+    - name: Smoke-test both published platforms
+      env:
+        IMAGE: augustobr/${{ matrix.image }}
+        DIGEST: ${{ steps.build.outputs.digest }}
+        SMOKE: ${{ matrix.smoke }}
+      run: "set -euo pipefail\nfor platform in linux/amd64 linux/arm64; do\n  docker pull --platform \"$platform\" \"${IMAGE}@${DIGEST}\"\
+        \n  docker run --rm --platform \"$platform\" --entrypoint /bin/sh \"${IMAGE}@${DIGEST}\" -ec \"$SMOKE\"\ndone\n"
+    - name: Promote current verified revision
+      env:
+        GH_TOKEN: ${{ github.token }}
+        IMAGE: augustobr/${{ matrix.image }}
+        DIGEST: ${{ steps.build.outputs.digest }}
+        BRANCH: main
+      run: "set -euo pipefail\nhead=$(gh api \"repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}\" --jq .object.sha)\nif\
+        \ [[ \"$head\" != \"$GITHUB_SHA\" ]]; then\n  echo 'Superseded commit; candidate retained without changing latest.'\n\
+        \  exit 0\nfi\nif old=$(docker buildx imagetools inspect \"${IMAGE}:latest\" --format '{{json .Manifest}}' | jq -er\
+        \ .digest); then\n  docker buildx imagetools create --tag \"${IMAGE}:previous\" \"${IMAGE}@${old}\"\nfi\ndocker buildx\
+        \ imagetools create --tag \"${IMAGE}:latest\" \"${IMAGE}@${DIGEST}\"\nactual=$(docker buildx imagetools inspect \"\
+        ${IMAGE}:latest\" --format '{{json .Manifest}}' | jq -er .digest)\n[[ \"$actual\" == \"$DIGEST\" ]]\n"
+    needs: verify
