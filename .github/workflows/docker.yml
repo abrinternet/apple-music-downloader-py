@@ -4,8 +4,6 @@ name: Docker Hub release
     branches:
     - main
   workflow_dispatch: null
-  schedule:
-  - cron: 35 3 * * 0
 permissions:
   contents: read
 concurrency:
