@@ -3,7 +3,13 @@ name: Docker Hub release
   push:
     branches:
     - main
-  workflow_dispatch: null
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Rebuild images without cache to apply vulnerability fixes.
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -69,7 +75,7 @@ jobs:
         cache-to: type=gha,mode=max,scope=${{ matrix.image }}
         provenance: mode=max
         sbom: true
-        no-cache: ${{ github.event_name == 'schedule' }}
+        no-cache: ${{ github.event_name == 'schedule' || inputs.force_rebuild }}
     - name: Smoke-test both published platforms
       env:
         IMAGE: augustobr/${{ matrix.image }}
